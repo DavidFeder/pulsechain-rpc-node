@@ -62,10 +62,7 @@ services:
       - --execution-endpoint=http://localhost:8551
       - --checkpoint-sync-url=https://checkpoint.pulsechain.com
       - --genesis-beacon-api-url=https://checkpoint.pulsechain.com
-      # Modern HTTP API flags (preferred)
-      - --http-host=0.0.0.0
-      - --http-port=3500
-      # Keep legacy aliases for compatibility with older images
+      # REST/JSON HTTP API — prysm-pulse still uses grpc-gateway-* (not --http-host/--http-port)
       - --grpc-gateway-host=0.0.0.0
       - --grpc-gateway-port=3500
       # gRPC API
