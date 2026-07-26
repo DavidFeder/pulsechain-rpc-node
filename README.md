@@ -187,7 +187,7 @@ By default, RPC binds to `0.0.0.0` (all interfaces). To accept connections **onl
    - `--http.addr=0.0.0.0` → `--http.addr=127.0.0.1`
    - `--ws.addr=0.0.0.0` → `--ws.addr=127.0.0.1`
 3. Under **beacon**, change:
-   - `--http-host=0.0.0.0` → `--http-host=127.0.0.1`
+   - `--grpc-gateway-host=0.0.0.0` → `--grpc-gateway-host=127.0.0.1`
    - `--rpc-host=0.0.0.0` → `--rpc-host=127.0.0.1`
 4. Apply the change:
 
