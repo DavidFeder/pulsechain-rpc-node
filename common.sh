@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# common.sh — shared helpers for pulse-rpc-node scripts
+# common.sh — shared helpers for pulsechain-rpc-node scripts
 # shellcheck shell=bash
 
 # Run docker compose with sudo only when the current user cannot talk to the daemon.

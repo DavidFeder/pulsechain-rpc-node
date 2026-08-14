@@ -1,4 +1,4 @@
-# pulse-rpc-node — PulseChain full node (Go-Pulse + Prysm-Pulse)
+# pulsechain-rpc-node — PulseChain full node (Go-Pulse + Prysm-Pulse)
 # Mainnet by default. Uses host networking for simple P2P + RPC.
 #
 # Data layout (matches official PulseChain docs):

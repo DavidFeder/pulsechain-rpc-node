@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# status.sh — quick health overview of the pulse-rpc-node stack
+# status.sh — quick health overview of the pulsechain-rpc-node stack
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

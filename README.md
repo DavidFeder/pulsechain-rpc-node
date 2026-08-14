@@ -18,8 +18,8 @@ This project packages the official PulseChain clients in Docker Compose with a s
 **Requirements:** Linux (Ubuntu 22.04 / 24.04 or Debian recommended), `sudo`, outbound internet, and a large SSD mounted where `/blockchain` will live.
 
 ```bash
-git clone https://github.com/DavidFeder/pulse-rpc-node.git
-cd pulse-rpc-node
+git clone https://github.com/DavidFeder/pulsechain-rpc-node.git
+cd pulsechain-rpc-node
 chmod +x install.sh
 ./install.sh
 ```
@@ -90,8 +90,8 @@ LAN binding is intentional so phones and other machines on the same network can 
 ### Install
 
 ```bash
-git clone https://github.com/DavidFeder/pulse-rpc-node.git
-cd pulse-rpc-node
+git clone https://github.com/DavidFeder/pulsechain-rpc-node.git
+cd pulsechain-rpc-node
 chmod +x *.sh
 ./install.sh
 ```
@@ -337,7 +337,7 @@ If `eth_syncing` returns `false`, the execution client reports that it is synced
 ## Repository layout
 
 ```
-pulse-rpc-node/
+pulsechain-rpc-node/
 ├── README.md
 ├── LICENSE
 ├── docker-compose.yml    # Go-Pulse + Prysm-Pulse

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — one-command setup for pulse-rpc-node
+# install.sh — one-command setup for pulsechain-rpc-node
 # Installs Docker (if needed), prepares /blockchain, generates JWT, starts the node.
 # Also adds safe UFW rules if UFW is already present.
 set -euo pipefail
@@ -24,7 +24,7 @@ die()   { err "$*"; exit 1; }
 
 echo ""
 echo -e "${BOLD}========================================${NC}"
-echo -e "${BOLD}  pulse-rpc-node installer${NC}"
+echo -e "${BOLD}  pulsechain-rpc-node installer${NC}"
 echo -e "${BOLD}  PulseChain private RPC (mainnet)${NC}"
 echo -e "${BOLD}========================================${NC}"
 echo ""
