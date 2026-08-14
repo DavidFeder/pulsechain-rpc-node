@@ -1,4 +1,4 @@
-# pulse-rpc-node
+# pulsechain-rpc-node
 
 Run a **PulseChain mainnet full node** and use it as a **private JSON-RPC endpoint** for MetaMask, Internet Money, and other wallets.
 
