@@ -270,14 +270,17 @@ if host_has_public_ip; then
     ok "UFW is active. Confirm RPC rules are LAN-only before relying on this node."
   else
     warn "No active UFW firewall detected."
+    warn "To skip this check, re-run with PULSE_ALLOW_PUBLIC_RPC=1"
     echo ""
-    if [[ -t 0 ]]; then
-      if ! confirm_yes "Continue anyway? [y/N] "; then
-        die "Aborted. Enable a firewall (see README) or run on a LAN-only host."
-      fi
+    if [[ "${PULSE_ALLOW_PUBLIC_RPC:-}" == "1" ]]; then
+      warn "Continuing because PULSE_ALLOW_PUBLIC_RPC=1"
+    elif confirm_yes "Continue anyway? [y/N] "; then
       warn "Continuing without an active host firewall..."
     else
-      warn "Non-interactive session — continuing, but this is unsafe on a public host."
+      if [[ ! -t 0 ]]; then
+        die "Aborted due to public IP without an active firewall (non-interactive). Enable a firewall or re-run with PULSE_ALLOW_PUBLIC_RPC=1"
+      fi
+      die "Aborted. Enable a firewall (see README) or re-run with PULSE_ALLOW_PUBLIC_RPC=1"
     fi
   fi
   echo ""

@@ -70,8 +70,9 @@ detect_lan_ip() {
   printf '%s\n' "${ip:-YOUR_LAN_IP}"
 }
 
-# True when the host itself has a publicly routable address (typical VPS).
-# Home machines behind NAT usually only have RFC1918 / ULA addresses.
+# True when the host itself has a publicly routable IPv4 address (typical VPS).
+# IPv6 is ignored: wallet listeners bind 0.0.0.0, so dual-stack home fiber
+# must not trigger the installer warning. CGNAT (100.64.0.0/10) is not public.
 host_has_public_ip() {
   local addr
   while read -r addr; do
@@ -79,17 +80,11 @@ host_has_public_ip() {
     case "${addr}" in
       127.*|10.*|192.168.*|169.254.*) ;;
       172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) ;;
+      # Carrier-grade NAT: 100.64.0.0–100.127.255.255
+      100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) ;;
       *) return 0 ;;
     esac
   done < <(ip -o -4 addr show up 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
-
-  while read -r addr; do
-    [[ -z "${addr}" ]] && continue
-    case "${addr}" in
-      fc*|fd*|fe80*) ;;
-      *) return 0 ;;
-    esac
-  done < <(ip -o -6 addr show up scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
 
   return 1
 }
