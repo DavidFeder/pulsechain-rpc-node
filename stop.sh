@@ -8,4 +8,4 @@ source "${SCRIPT_DIR}/common.sh"
 
 echo "Stopping node (grace period up to ~5 minutes for clean shutdown)..."
 run_compose down
-echo "Node stopped. Chain data is preserved in /blockchain"
+echo "Node stopped. Chain data is preserved in ${DATA_DIR}"
