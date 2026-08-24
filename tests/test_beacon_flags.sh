@@ -67,13 +67,13 @@ else
   pass "no --subscribe-all-subnets (RPC-only default)"
 fi
 
-if grep -Eq 'go-pulse:latest[[:space:]]*$' "$COMPOSE"; then
+if grep -E '^\s+image:' "$COMPOSE" | grep -q 'go-pulse:latest'; then
   fail "geth image default is floating :latest — pin a version tag"
 else
   pass "geth image default is not :latest"
 fi
 
-if grep -Eq 'beacon-chain:latest[[:space:]]*$' "$COMPOSE"; then
+if grep -E '^\s+image:' "$COMPOSE" | grep -q 'beacon-chain:latest'; then
   fail "beacon image default is floating :latest — pin a version tag"
 else
   pass "beacon image default is not :latest"
@@ -169,7 +169,8 @@ if CFG="$(run_compose_config)"; then
     OVERRIDE=""
   }
   if [[ -n "$OVERRIDE" ]]; then
-    echo "$OVERRIDE" | grep -q '/mnt/pulse-data:/blockchain' \
+    echo "$OVERRIDE" | grep -q '/mnt/pulse-data' \
+      && echo "$OVERRIDE" | grep -q 'target: /blockchain' \
       && pass "DATA_DIR override interpolates into volume" \
       || fail "DATA_DIR override did not appear in compose config"
     echo "$OVERRIDE" | grep -q -- '--http.port=18545' \

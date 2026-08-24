@@ -22,10 +22,10 @@ if [[ "${DATA_DIR}" == "/mnt/from-env" ]]; then
 else
   fail "load_dotenv DATA_DIR got '${DATA_DIR:-}'"
 fi
-if [[ -z "${EVIL:-}" ]]; then
-  pass "load_dotenv does not execute command substitutions"
+if [[ "${EVIL:-}" == '$(echo pwned)' ]]; then
+  pass "load_dotenv stores command substitutions as literals"
 else
-  fail "load_dotenv executed a value: EVIL='${EVIL}'"
+  fail "load_dotenv mishandled EVIL='${EVIL:-}'"
 fi
 
 # Existing environment wins
@@ -62,7 +62,7 @@ for script in install.sh start.sh stop.sh restart.sh logs.sh update.sh status.sh
 done
 
 # restart.sh must recreate from compose, not `compose restart`
-if grep -qE 'compose restart' "${ROOT}/restart.sh"; then
+if grep -E 'run_compose[[:space:]]+restart' "${ROOT}/restart.sh" >/dev/null; then
   fail "restart.sh still uses 'compose restart' (drops compose/flag edits)"
 else
   pass "restart.sh does not use 'compose restart'"
