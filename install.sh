@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh — one-command setup for pulsechain-rpc-node
-# Installs Docker (if needed), prepares /blockchain, generates JWT, starts the node.
+# Installs Docker (if needed), prepares the data dir, generates JWT, starts the node.
 # Also adds safe UFW rules if UFW is already present.
 set -euo pipefail
 
@@ -42,7 +42,7 @@ else
     die "sudo is required when not running as root. Install sudo or re-run as root."
   fi
   if ! sudo -n true 2>/dev/null; then
-    info "This script needs sudo for Docker install and /blockchain setup."
+    info "This script needs sudo for Docker install and ${DATA_DIR} setup."
     sudo -v || die "Could not obtain sudo privileges."
   fi
   SUDO="sudo"
@@ -141,40 +141,55 @@ fi
 if [[ "${EUID}" -ne 0 ]]; then
   if ! id -nG "${USER}" | tr ' ' '\n' | grep -qx docker; then
     info "Adding ${USER} to the docker group (log out/in may be required)..."
+    warn "Members of the docker group can effectively become root via the Docker daemon."
     $SUDO usermod -aG docker "${USER}" || warn "Could not add user to docker group."
   fi
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Prepare /blockchain (official layout: execution + consensus + jwt)
+# 4. Prepare data directory (official layout: execution + consensus + jwt)
 # ---------------------------------------------------------------------------
-info "Preparing data directory /blockchain ..."
-$SUDO mkdir -p /blockchain/execution /blockchain/consensus
-$SUDO chmod 755 /blockchain /blockchain/execution /blockchain/consensus
+info "Preparing data directory ${DATA_DIR} ..."
+$SUDO mkdir -p "${DATA_DIR}/execution" "${DATA_DIR}/consensus"
+$SUDO chmod 755 "${DATA_DIR}" "${DATA_DIR}/execution" "${DATA_DIR}/consensus"
 
 # Only chown when safe: empty tree or already owned by this user.
 # Avoid recursive chown of multi-TB chain data on every re-run.
 if [[ "${EUID}" -ne 0 ]]; then
-  if [[ -z "$(ls -A /blockchain/execution 2>/dev/null || true)" ]] \
-     && [[ -z "$(ls -A /blockchain/consensus 2>/dev/null || true)" ]]; then
-    $SUDO chown -R "${USER}:${USER}" /blockchain 2>/dev/null || true
+  if [[ -z "$(ls -A "${DATA_DIR}/execution" 2>/dev/null || true)" ]] \
+     && [[ -z "$(ls -A "${DATA_DIR}/consensus" 2>/dev/null || true)" ]]; then
+    $SUDO chown -R "${USER}:${USER}" "${DATA_DIR}" 2>/dev/null || true
   else
-    $SUDO chown "${USER}:${USER}" /blockchain 2>/dev/null || true
+    $SUDO chown "${USER}:${USER}" "${DATA_DIR}" 2>/dev/null || true
   fi
 fi
-ok "/blockchain is ready (execution + consensus subdirs)."
+ok "${DATA_DIR} is ready (execution + consensus subdirs)."
+
+# Disk headroom — warn only. Official full-node guidance is ~1.5–2 TB+.
+if avail_kb="$(df -Pk "${DATA_DIR}" 2>/dev/null | awk 'NR==2 {print $4}')"; then
+  if [[ -n "${avail_kb}" && "${avail_kb}" =~ ^[0-9]+$ ]]; then
+    avail_gb=$((avail_kb / 1024 / 1024))
+    if (( avail_gb < 100 )); then
+      warn "Only ${avail_gb} GB free on the filesystem that holds ${DATA_DIR}."
+      warn "A PulseChain full node typically needs 1.5–2 TB+ SSD and grows over time."
+    elif (( avail_gb < 1500 )); then
+      warn "${avail_gb} GB free at ${DATA_DIR}. Official guidance is about 1.5–2 TB+ for a full node."
+    else
+      ok "${avail_gb} GB free at ${DATA_DIR}."
+    fi
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 5. JWT secret (required for Engine API between geth and beacon)
 # ---------------------------------------------------------------------------
-JWT_PATH="/blockchain/jwt.hex"
+JWT_PATH="${DATA_DIR}/jwt.hex"
 if [[ -f "${JWT_PATH}" ]]; then
   ok "JWT secret already exists at ${JWT_PATH}"
 else
   info "Generating JWT secret at ${JWT_PATH} ..."
   # No trailing newline (required by clients / official docs)
   openssl rand -hex 32 | tr -d '\n' | $SUDO tee "${JWT_PATH}" >/dev/null
-  $SUDO chmod 644 "${JWT_PATH}"
   if [[ "${EUID}" -ne 0 ]]; then
     $SUDO chown "${USER}:${USER}" "${JWT_PATH}" 2>/dev/null || true
   fi
@@ -184,6 +199,8 @@ else
   fi
   ok "JWT secret created."
 fi
+# Engine API credential — readable only by owner (and root).
+$SUDO chmod 600 "${JWT_PATH}" 2>/dev/null || chmod 600 "${JWT_PATH}"
 
 # ---------------------------------------------------------------------------
 # 6. .env from example
@@ -214,7 +231,7 @@ check_port_in_use() {
   fi
 }
 
-PORTS_TO_CHECK=(8545 8546 3500 4000 8551 30303 13000 12000)
+PORTS_TO_CHECK=("${HTTP_PORT}" "${WS_PORT}" "${BEACON_HTTP_PORT}" "${BEACON_GRPC_PORT}" 8551 30303 13000 12000)
 PORT_CONFLICTS=()
 for port in "${PORTS_TO_CHECK[@]}"; do
   if check_port_in_use "${port}"; then
@@ -223,18 +240,54 @@ for port in "${PORTS_TO_CHECK[@]}"; do
 done
 if [[ "${#PORT_CONFLICTS[@]}" -gt 0 ]]; then
   warn "These ports are already in use on this machine: ${PORT_CONFLICTS[*]}"
-  warn "A full node needs them free (or you must change ports in docker-compose.yml)."
+  warn "A full node needs them free (or you must change ports in .env / docker-compose.yml)."
   warn "Common cause: another Geth/Prysm/PulseChain node already running."
   echo ""
-  read -r -p "Continue anyway? [y/N] " reply || reply="n"
-  case "${reply}" in
-    y|Y|yes|YES) warn "Continuing despite port conflicts..." ;;
-    *) die "Aborted due to port conflicts. Free the ports and re-run ./install.sh" ;;
-  esac
+  if confirm_yes "Continue anyway? [y/N] "; then
+    warn "Continuing despite port conflicts..."
+  else
+    if [[ ! -t 0 ]]; then
+      die "Aborted due to port conflicts (non-interactive). Free the ports and re-run ./install.sh"
+    fi
+    die "Aborted due to port conflicts. Free the ports and re-run ./install.sh"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
-# 8. UFW rules (only if UFW is already installed)
+# 8. Public-IP / firewall preflight
+# ---------------------------------------------------------------------------
+ufw_is_active() {
+  command -v ufw >/dev/null 2>&1 || return 1
+  $SUDO ufw status 2>/dev/null | grep -qi '^Status: active'
+}
+
+if host_has_public_ip; then
+  echo ""
+  warn "This machine appears to have a public IP address on a local interface."
+  warn "RPC binds to 0.0.0.0 — without a firewall this is a public unauthenticated endpoint."
+  warn "Do not use this stack on a VPS/cloud VM unless you restrict ${HTTP_PORT}/${WS_PORT}/${BEACON_HTTP_PORT}/${BEACON_GRPC_PORT}."
+  if ufw_is_active; then
+    ok "UFW is active. Confirm RPC rules are LAN-only before relying on this node."
+  else
+    warn "No active UFW firewall detected."
+    warn "To skip this check, re-run with PULSE_ALLOW_PUBLIC_RPC=1"
+    echo ""
+    if [[ "${PULSE_ALLOW_PUBLIC_RPC:-}" == "1" ]]; then
+      warn "Continuing because PULSE_ALLOW_PUBLIC_RPC=1"
+    elif confirm_yes "Continue anyway? [y/N] "; then
+      warn "Continuing without an active host firewall..."
+    else
+      if [[ ! -t 0 ]]; then
+        die "Aborted due to public IP without an active firewall (non-interactive). Enable a firewall or re-run with PULSE_ALLOW_PUBLIC_RPC=1"
+      fi
+      die "Aborted. Enable a firewall (see README) or re-run with PULSE_ALLOW_PUBLIC_RPC=1"
+    fi
+  fi
+  echo ""
+fi
+
+# ---------------------------------------------------------------------------
+# 9. UFW rules (only if UFW is already installed)
 # ---------------------------------------------------------------------------
 if command -v ufw >/dev/null 2>&1; then
   info "UFW is installed — adding recommended rules (RPC restricted to common private ranges)..."
@@ -245,11 +298,12 @@ if command -v ufw >/dev/null 2>&1; then
   $SUDO ufw allow 13000/tcp comment 'PulseChain Beacon P2P TCP' >/dev/null 2>&1 || true
   $SUDO ufw allow 12000/udp comment 'PulseChain Beacon P2P UDP' >/dev/null 2>&1 || true
 
-  # Restrict RPC to common private LAN ranges (safe default)
+  # Restrict RPC / beacon APIs to common private LAN ranges (safe default)
   for range in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
-    $SUDO ufw allow from "${range}" to any port 8545 proto tcp comment 'Pulse RPC HTTP - LAN' >/dev/null 2>&1 || true
-    $SUDO ufw allow from "${range}" to any port 8546 proto tcp comment 'Pulse RPC WS - LAN' >/dev/null 2>&1 || true
-    $SUDO ufw allow from "${range}" to any port 3500 proto tcp comment 'Pulse Beacon API - LAN' >/dev/null 2>&1 || true
+    $SUDO ufw allow from "${range}" to any port "${HTTP_PORT}" proto tcp comment 'Pulse RPC HTTP - LAN' >/dev/null 2>&1 || true
+    $SUDO ufw allow from "${range}" to any port "${WS_PORT}" proto tcp comment 'Pulse RPC WS - LAN' >/dev/null 2>&1 || true
+    $SUDO ufw allow from "${range}" to any port "${BEACON_HTTP_PORT}" proto tcp comment 'Pulse Beacon API - LAN' >/dev/null 2>&1 || true
+    $SUDO ufw allow from "${range}" to any port "${BEACON_GRPC_PORT}" proto tcp comment 'Pulse Beacon gRPC - LAN' >/dev/null 2>&1 || true
   done
 
   ok "UFW rules added (P2P open, RPC limited to private networks)."
@@ -261,12 +315,13 @@ if command -v ufw >/dev/null 2>&1; then
   warn "    sudo ufw enable"
   warn "  Then check: sudo ufw status numbered"
   warn "  If your home network uses a different subnet, edit the rules accordingly."
+  warn "  IPv4 rules do not cover IPv6 — if the host has global IPv6, add matching rules or disable it."
 else
   info "UFW not found — assuming no software firewall (or it is managed elsewhere). Skipping firewall rules."
 fi
 
 # ---------------------------------------------------------------------------
-# 9. Pull images + start stack
+# 10. Pull images + start stack
 # ---------------------------------------------------------------------------
 if [[ ! -f docker-compose.yml ]]; then
   die "docker-compose.yml not found in ${SCRIPT_DIR}"
@@ -279,15 +334,9 @@ info "Starting node containers..."
 run_compose up -d || die "Failed to start containers. Run: ./logs.sh"
 
 # ---------------------------------------------------------------------------
-# 10. Success message
+# 11. Success message
 # ---------------------------------------------------------------------------
-LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-if [[ -z "${LAN_IP}" ]]; then
-  LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
-fi
-if [[ -z "${LAN_IP}" ]]; then
-  LAN_IP="YOUR_LAN_IP"
-fi
+LAN_IP="$(detect_lan_ip)"
 
 echo ""
 echo -e "${GREEN}${BOLD}========================================${NC}"
@@ -295,26 +344,30 @@ echo -e "${GREEN}${BOLD}  Node is starting!${NC}"
 echo -e "${GREEN}${BOLD}========================================${NC}"
 echo ""
 echo -e "  Containers: ${BOLD}pulse-geth${NC} + ${BOLD}pulse-beacon${NC}"
-echo -e "  Data dir:   ${BOLD}/blockchain${NC}  (execution + consensus)"
+echo -e "  Data dir:   ${BOLD}${DATA_DIR}${NC}  (execution + consensus)"
 echo -e "  Network:    ${BOLD}PulseChain Mainnet${NC} (chain id 369)"
+echo -e "  Images:     ${BOLD}${GETH_IMAGE}${NC}"
+echo -e "              ${BOLD}${BEACON_IMAGE}${NC}"
 echo ""
 echo -e "${YELLOW}${BOLD}SECURITY REMINDER${NC}"
-echo -e "  RPC ports ${BOLD}8545${NC}, ${BOLD}8546${NC}, and beacon ${BOLD}3500${NC} are open on your LAN."
-echo -e "  Use only on a trusted home network. ${BOLD}Do not${NC} port-forward them to the internet."
+echo -e "  RPC ports ${BOLD}${HTTP_PORT}${NC}, ${BOLD}${WS_PORT}${NC}, beacon ${BOLD}${BEACON_HTTP_PORT}${NC}, and gRPC ${BOLD}${BEACON_GRPC_PORT}${NC} are open on your LAN."
+echo -e "  Engine API (8551) is localhost-only. Use only on a trusted home network."
+echo -e "  ${BOLD}Do not${NC} port-forward RPC/API ports to the internet."
 echo ""
 echo -e "${BOLD}Connect MetaMask / Internet Money:${NC}"
 echo -e "  Network Name:  PulseChain"
-echo -e "  RPC URL:       ${CYAN}http://${LAN_IP}:8545${NC}"
+echo -e "  RPC URL:       ${CYAN}http://${LAN_IP}:${HTTP_PORT}${NC}"
 echo -e "  Chain ID:      369"
 echo -e "  Symbol:        PLS"
 echo -e "  Explorer:      https://scan.pulsechain.com"
 echo ""
 echo -e "${BOLD}Useful commands (from this directory):${NC}"
+echo -e "  ./status.sh        # sync, peers, disk"
 echo -e "  ./logs.sh          # follow logs"
 echo -e "  ./stop.sh          # stop node"
 echo -e "  ./start.sh         # start node"
-echo -e "  ./restart.sh       # restart node"
-echo -e "  ./update.sh        # pull latest images & restart"
+echo -e "  ./restart.sh       # apply compose changes / restart"
+echo -e "  ./update.sh        # pull pinned images & recreate"
 echo ""
 echo -e "  Or:  docker compose logs -f"
 echo ""

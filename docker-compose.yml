@@ -2,40 +2,51 @@
 # Mainnet by default. Uses host networking for simple P2P + RPC.
 #
 # Data layout (matches official PulseChain docs):
-#   /blockchain/jwt.hex       shared Engine API JWT
-#   /blockchain/execution     Go-Pulse datadir
-#   /blockchain/consensus     Prysm-Pulse datadir
+#   ${DATA_DIR}/jwt.hex       shared Engine API JWT
+#   ${DATA_DIR}/execution     Go-Pulse datadir
+#   ${DATA_DIR}/consensus     Prysm-Pulse datadir
 #
-# ⚠  RPC is bound to 0.0.0.0 (LAN-visible) by default.
-#    Use only on a trusted home network. Never port-forward 8545/8546/3500.
+# ⚠  Wallet RPC is bound to 0.0.0.0 (LAN-visible) by default.
+#    Use only on a trusted home network. Never port-forward 8545/8546/3500/4000.
+#    Engine API (8551) is localhost-only.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
 
 services:
   # ---------------------------------------------------------------------------
   # Execution client — Go-Pulse (geth)
+  # Pinned to v3.3.0 (same digest as :latest on 2026-08-24).
+  # Override with GETH_IMAGE=registry.gitlab.com/pulsechaincom/go-pulse:latest
   # ---------------------------------------------------------------------------
   geth:
-    image: registry.gitlab.com/pulsechaincom/go-pulse:latest
+    image: ${GETH_IMAGE:-registry.gitlab.com/pulsechaincom/go-pulse:v3.3.0}
     container_name: pulse-geth
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 5m
+    logging: *default-logging
     volumes:
-      - /blockchain:/blockchain
+      - ${DATA_DIR:-/blockchain}:/blockchain
     command:
       - --pulsechain
       - --datadir=/blockchain/execution
       - --authrpc.jwtsecret=/blockchain/jwt.hex
-      - --authrpc.addr=0.0.0.0
-      - --authrpc.vhosts=*
+      - --authrpc.addr=127.0.0.1
+      - --authrpc.port=8551
+      - --authrpc.vhosts=localhost
       - --http
       - --http.addr=0.0.0.0
-      - --http.port=8545
+      - --http.port=${HTTP_PORT:-8545}
       - --http.api=eth,net,web3,txpool
       - --http.corsdomain=*
       - --http.vhosts=*
       - --ws
       - --ws.addr=0.0.0.0
-      - --ws.port=8546
+      - --ws.port=${WS_PORT:-8546}
       - --ws.api=eth,net,web3,txpool
       - --ws.origins=*
       - --maxpeers=150
@@ -44,30 +55,33 @@ services:
 
   # ---------------------------------------------------------------------------
   # Consensus client — Prysm-Pulse Beacon Chain
+  # Pinned to v2.3.0 (same digest as :latest on 2026-08-24).
+  # Override with BEACON_IMAGE=.../beacon-chain:latest
   # ---------------------------------------------------------------------------
   beacon:
-    image: registry.gitlab.com/pulsechaincom/prysm-pulse/beacon-chain:latest
+    image: ${BEACON_IMAGE:-registry.gitlab.com/pulsechaincom/prysm-pulse/beacon-chain:v2.3.0}
     container_name: pulse-beacon
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 5m
+    logging: *default-logging
     depends_on:
       - geth
     volumes:
-      - /blockchain:/blockchain
+      - ${DATA_DIR:-/blockchain}:/blockchain
     command:
       - --pulsechain
       - --datadir=/blockchain/consensus
       - --jwt-secret=/blockchain/jwt.hex
-      - --execution-endpoint=http://localhost:8551
+      - --execution-endpoint=http://127.0.0.1:8551
       - --checkpoint-sync-url=https://checkpoint.pulsechain.com
       - --genesis-beacon-api-url=https://checkpoint.pulsechain.com
       # REST/JSON HTTP API — prysm-pulse still uses grpc-gateway-* (not --http-host/--http-port)
       - --grpc-gateway-host=0.0.0.0
-      - --grpc-gateway-port=3500
-      # gRPC API
+      - --grpc-gateway-port=${BEACON_HTTP_PORT:-3500}
+      # gRPC API (LAN-visible; not needed for MetaMask)
       - --rpc-host=0.0.0.0
+      - --rpc-port=${BEACON_GRPC_PORT:-4000}
       - --p2p-tcp-port=13000
       - --p2p-udp-port=12000
-      - --subscribe-all-subnets
       - --p2p-max-peers=150
