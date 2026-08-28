@@ -9,13 +9,13 @@ This project packages the official PulseChain clients in Docker Compose with a s
 | [Go-Pulse](https://gitlab.com/pulsechaincom/go-pulse) | Execution layer (JSON-RPC / WebSocket) | `registry.gitlab.com/pulsechaincom/go-pulse:v3.3.0` |
 | [Prysm-Pulse](https://gitlab.com/pulsechaincom/prysm-pulse) | Consensus layer (beacon chain) | `registry.gitlab.com/pulsechaincom/prysm-pulse/beacon-chain:v2.3.0` |
 
-**Defaults:** mainnet · checkpoint sync · data under `/blockchain` · wallet RPC on the LAN (`0.0.0.0`) · Engine API localhost-only · pinned client tags (`./update.sh --latest` to float)
+**Defaults:** mainnet · checkpoint sync · data under `/blockchain` · wallet RPC on the LAN (`0.0.0.0`) · Engine API and beacon HTTP/gRPC localhost-only · digest-pinned client tags (`./update.sh --latest` writes `:latest` into `.env`)
 
 ---
 
 ## Quick start
 
-**Requirements:** Linux (Ubuntu 22.04 / 24.04 or Debian recommended), `sudo`, outbound internet, and a large SSD mounted where `/blockchain` will live.
+**Requirements:** Linux (Ubuntu 22.04 / 24.04 or Debian recommended; amd64 or arm64), `sudo`, outbound internet, and a large SSD mounted where `/blockchain` will live.
 
 ```bash
 git clone https://github.com/DavidFeder/pulsechain-rpc-node.git
@@ -60,8 +60,8 @@ If you need ready-to-run node hardware, you can find pre-built options at [valid
 |------|---------|
 | **8545** | HTTP JSON-RPC (primary wallet endpoint) |
 | **8546** | WebSocket RPC |
-| **3500** | Beacon HTTP API |
-| **4000** | Beacon gRPC (not needed for MetaMask) |
+| **3500** | Beacon HTTP API (**localhost** by default) |
+| **4000** | Beacon gRPC (**localhost** by default; not needed for MetaMask) |
 
 **Intended use**
 
@@ -73,7 +73,9 @@ If you need ready-to-run node hardware, you can find pre-built options at [valid
 - Public internet exposure
 - Untrusted or shared networks without additional controls
 
-**Do not** port-forward **8545**, **8546**, **3500**, or **4000** to the public internet. This project is a **private RPC**, not a public endpoint. The Engine API on **8551** is bound to localhost.
+**Do not** port-forward **8545**, **8546**, **3500**, or **4000** to the public internet. This project is a **private RPC**, not a public endpoint. The Engine API on **8551** and the beacon HTTP/gRPC APIs are bound to localhost.
+
+Checkpoint sync trusts [checkpoint.pulsechain.com](https://checkpoint.pulsechain.com) (same URL as the official PulseChain docs). That is a trusted third party for the initial beacon state. Prysm also recommends pairing it with a weak-subjectivity checkpoint if you want extra assurance against a long-range attack.
 
 CORS / vhosts default to `*` so LAN web wallets can reach the node. A page you visit can also call that RPC if it can reach the LAN IP — keep this on a trusted network.
 
@@ -87,7 +89,7 @@ LAN binding is intentional so phones and other machines on the same network can 
 
 ### Prerequisites
 
-- Linux host (Ubuntu 22.04 / 24.04 or Debian recommended)
+- Linux host (Ubuntu 22.04 / 24.04 or Debian recommended; **amd64 or arm64**)
 - `sudo` privileges
 - Sufficient free space for `/blockchain`
 - Outbound connectivity to pull images and sync with the network
@@ -115,11 +117,7 @@ chmod +x *.sh
 
 ### Discover your LAN IP
 
-Printed by the installer. You can also run:
-
-```bash
-hostname -I | awk '{print $1}'
-```
+Printed by the installer and by `./status.sh` (source address of the default route). Prefer that over `hostname -I`, which often prints Docker's `172.17.0.1` (`docker0`) first and will not work from a phone.
 
 ---
 
@@ -167,9 +165,9 @@ Run the following from the project directory:
 | Follow beacon logs | `./logs.sh beacon` |
 | Stop | `./stop.sh` |
 | Start | `./start.sh` |
-| Recreate from compose (applies flag/.env changes) | `./restart.sh` |
+| Recreate from compose (applies flag/.env changes and bounces containers) | `./restart.sh` |
 | Update pinned images and recreate | `./update.sh` |
-| Float on upstream `:latest` images | `./update.sh --latest` |
+| Float on upstream `:latest` images (persists to `.env`) | `./update.sh --latest` |
 
 Equivalent Docker Compose commands:
 
@@ -186,22 +184,32 @@ Chain data is stored under **`/blockchain`** and is retained when containers are
 
 ## Localhost-only mode
 
-By default, wallet RPC binds to `0.0.0.0` (all interfaces). The Engine API (`--authrpc.addr=127.0.0.1`, port 8551) is already host-only. To accept wallet/beacon API connections **only on the host**:
+By default, **wallet** RPC binds to `0.0.0.0` (all interfaces). The Engine API (`--authrpc.addr=127.0.0.1`, port 8551) and beacon HTTP/gRPC (`BEACON_HTTP_HOST` / `BEACON_GRPC_HOST`, default `127.0.0.1`) are already host-only.
+
+To accept wallet RPC connections **only on the host**:
 
 1. Edit `docker-compose.yml`.
 2. Under the **geth** service, change:
    - `--http.addr=0.0.0.0` → `--http.addr=127.0.0.1`
    - `--ws.addr=0.0.0.0` → `--ws.addr=127.0.0.1`
-3. Under **beacon**, change:
-   - `--grpc-gateway-host=0.0.0.0` → `--grpc-gateway-host=127.0.0.1`
-   - `--rpc-host=0.0.0.0` → `--rpc-host=127.0.0.1`
-4. Apply the change (`./restart.sh` recreates containers from compose; it does not keep stale flags):
+3. Apply the change (`./restart.sh` recreates containers from compose; it does not keep stale flags):
 
 ```bash
 ./restart.sh
 ```
 
 Use `http://127.0.0.1:8545` in wallets on **that machine only**.
+
+### LAN beacon API (optional)
+
+Beacon REST/gRPC are not required for MetaMask. Prysm-Pulse still uses `--grpc-gateway-host` / `--rpc-host` (not `--http-host`). To expose them on the LAN, set in `.env`:
+
+```bash
+BEACON_HTTP_HOST=0.0.0.0
+BEACON_GRPC_HOST=0.0.0.0
+```
+
+Then run `./restart.sh`. Keep those ports firewalled to your LAN; never port-forward them.
 
 ---
 
@@ -211,8 +219,8 @@ Use `http://127.0.0.1:8545` in wallets on **that machine only**.
 |------|----------|---------|--------------|
 | 8545 | TCP | HTTP JSON-RPC (wallets) | `0.0.0.0` (LAN) |
 | 8546 | TCP | WebSocket RPC | `0.0.0.0` (LAN) |
-| 3500 | TCP | Beacon REST API | `0.0.0.0` (LAN) |
-| 4000 | TCP | Beacon gRPC | `0.0.0.0` (LAN) |
+| 3500 | TCP | Beacon REST API | `127.0.0.1` (localhost; override with `BEACON_HTTP_HOST`) |
+| 4000 | TCP | Beacon gRPC | `127.0.0.1` (localhost; override with `BEACON_GRPC_HOST`) |
 | 8551 | TCP | Engine API (JWT; geth ↔ beacon) | `127.0.0.1` (localhost only) |
 | 30303 | TCP/UDP | Execution P2P | Host |
 | 13000 | TCP | Beacon P2P | Host |
@@ -293,6 +301,8 @@ sudo ufw status numbered
 
 Replace `192.168.0.0/16` with your actual LAN range. Never open the RPC ports to `0.0.0.0/0` or the public internet. These examples are IPv4; if the host has global IPv6, add matching `from <your-ula>` rules or disable IPv6 on the node.
 
+On a VPS or cloud VM, `10.0.0.0/8` (and often `172.16.0.0/12`) is the **VPC**, not a home Wi-Fi. Tighten `from` to your office/VPN prefix instead of the whole RFC1918 range.
+
 ---
 
 ## Configuration summary
@@ -304,8 +314,12 @@ Replace `192.168.0.0/16` with your actual LAN range. Never open the RPC ports to
 | Execution datadir | `$DATA_DIR/execution` |
 | Consensus datadir | `$DATA_DIR/consensus` |
 | JWT secret | `$DATA_DIR/jwt.hex` (mode `600`) |
-| Execution image | `go-pulse:v3.3.0` (override with `GETH_IMAGE` or `./update.sh --latest`) |
-| Beacon image | `beacon-chain:v2.3.0` (override with `BEACON_IMAGE` or `./update.sh --latest`) |
+| Execution image | `go-pulse:v3.3.0` digest-pinned (override with `GETH_IMAGE` or `./update.sh --latest`) |
+| Beacon image | `beacon-chain:v2.3.0` digest-pinned (override with `BEACON_IMAGE` or `./update.sh --latest`) |
+| Beacon HTTP / gRPC | `127.0.0.1` (`BEACON_HTTP_HOST` / `BEACON_GRPC_HOST`) |
+| Geth IPC | disabled (`--ipcdisable`; admin APIs are not on the host filesystem) |
+| Geth cache | `1024` MB (`GETH_CACHE`) |
+| File descriptors | `nofile` 65535 (container ulimit) |
 | Checkpoint sync | `https://checkpoint.pulsechain.com` (trusted third party; same as official docs) |
 | Restart policy | `unless-stopped` |
 | Stop grace period | `5m` |
@@ -323,10 +337,11 @@ Optional variables (`DATA_DIR`, ports, image pins) are documented in `.env.examp
 | Docker permission denied | Log out and back in after install (docker group membership), or prefix commands with `sudo` |
 | `address already in use` / crash loop | Another node is using ports 8545, 8546, 3500, 4000, or 8551. Stop the other process or change ports in `docker-compose.yml` |
 | Beacon cannot find execution client | Confirm both containers are running and that `/blockchain/jwt.hex` exists and is shared by both |
-| JWT / `401 Unauthorized` to execution | Ensure only one execution client is on port 8551 and both services use the same `/blockchain/jwt.hex` |
-| Wallet cannot connect | Verify LAN IP, same network, host firewall rules; test `curl` against `127.0.0.1:8545` on the node. `./restart.sh` after compose edits (it recreates containers). |
+| JWT / `401 Unauthorized` to execution | Ensure only one execution client is on port 8551 and both services use the same `/blockchain/jwt.hex`. The file must be 64 hex characters with **no newline**. Keep the host clock in sync (NTP / `timedatectl`); JWT `iat` skew also returns 401. |
+| Wallet cannot connect | Verify LAN IP from `./status.sh` (not `hostname -I` / docker0), same network, host firewall rules; test `curl` against `127.0.0.1:8545` on the node. `./restart.sh` after compose edits (it recreates containers). |
+| `./restart.sh` did nothing (old versions) | Current `restart.sh` uses `docker compose up -d --force-recreate`. Upgrade the scripts if an older copy only ran `up -d`. |
 | Disk space pressure | Full nodes grow over time — monitor free space and use a large SSD |
-| Slow sync | Prefer NVMe storage, adequate RAM, and open P2P ports where practical |
+| Slow sync | Prefer NVMe storage, adequate RAM, and open P2P ports where practical. On 16 GB hosts, try `GETH_CACHE=512` in `.env` if the machine swaps. |
 
 **Health checks** (run on the node host):
 
@@ -334,7 +349,7 @@ Optional variables (`DATA_DIR`, ports, image pins) are documented in `.env.examp
 ./status.sh
 ```
 
-`status.sh` reports container state, `eth_syncing` / block / peers, beacon sync, and disk free on the data directory.
+`status.sh` reports container state, `eth_syncing` / block / peers, beacon sync, disk free, and the wallet RPC URL.
 
 If `eth_syncing` returns `false`, the execution client reports that it is synced. Wait for the beacon section to report synced as well before relying on the endpoint.
 
@@ -356,8 +371,10 @@ pulsechain-rpc-node/
 ├── restart.sh            # Recreate from compose (applies edits)
 ├── logs.sh
 ├── update.sh             # Pull pinned images; --latest to float
-└── tests/
-    └── test_beacon_flags.sh
+├── tests/
+│   ├── test_common.sh
+│   ├── test_beacon_flags.sh
+│   └── test_image_pins.sh
 ```
 
 ---

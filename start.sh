@@ -6,6 +6,6 @@ cd "$SCRIPT_DIR"
 # shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
 
-run_compose up -d
-echo "Node started (pulse-geth + pulse-beacon)."
+run_compose up -d --remove-orphans
+echo "Node started (${GETH_CONTAINER} + ${BEACON_CONTAINER})."
 echo "Follow logs with: ./logs.sh"

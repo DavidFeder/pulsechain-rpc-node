@@ -62,7 +62,7 @@ PY
 else
   if curl -s --max-time 5 -X POST "http://127.0.0.1:${HTTP_PORT}" \
     -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' | grep -q '"result":false'; then
+    -d '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' | grep -Eq '"result"[[:space:]]*:[[:space:]]*false'; then
     echo "eth_syncing:     false (execution client reports synced)"
   elif curl -s --max-time 3 -X POST "http://127.0.0.1:${HTTP_PORT}" \
     -H 'Content-Type: application/json' \
@@ -120,6 +120,14 @@ else
     echo "Beacon REST: not responding yet (still starting)"
   fi
 fi
+
+echo ""
+echo "=== Wallet RPC ==="
+LAN_IP="$(detect_lan_ip)"
+echo "  LAN:       http://${LAN_IP}:${HTTP_PORT}"
+echo "  This host: http://127.0.0.1:${HTTP_PORT}"
+echo "  Chain ID:  369 (PulseChain)"
+echo "  (hostname -I can print docker0 — prefer the LAN line above or this script)"
 
 echo ""
 echo "=== Disk (${DATA_DIR}) ==="
