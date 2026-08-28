@@ -32,6 +32,9 @@ echo ""
 # ---------------------------------------------------------------------------
 # 1. Root / sudo check
 # ---------------------------------------------------------------------------
+INSTALL_USER="$(effective_install_user)"
+INSTALL_GROUP="$(effective_install_group "${INSTALL_USER}")"
+
 if [[ "${EUID}" -eq 0 ]]; then
   warn "You are running as root."
   warn "This works, but running as a normal user with sudo is safer and recommended."
@@ -91,6 +94,8 @@ if [[ "${need_docker_install}" == true ]]; then
   case "${OS_ID}" in
     ubuntu|debian|linuxmint|pop)
       $SUDO apt-get update -y
+      # Distro docker.io / containerd packages conflict with Docker CE.
+      $SUDO apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
       $SUDO apt-get install -y ca-certificates curl gnupg openssl
       $SUDO install -m 0755 -d /etc/apt/keyrings
       if [[ ! -f /etc/apt/keyrings/docker.asc ]]; then
@@ -114,7 +119,12 @@ if [[ "${need_docker_install}" == true ]]; then
       $SUDO apt-get update -y
       $SUDO apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
       $SUDO systemctl enable --now docker
-      ok "Docker installed."
+      info "Waiting for the Docker daemon..."
+      if wait_for_docker; then
+        ok "Docker installed."
+      else
+        die "Docker was installed but the daemon is not responding. Try: sudo systemctl status docker"
+      fi
       ;;
     *)
       die "Automatic Docker install is only supported on Ubuntu/Debian. Install Docker manually: https://docs.docker.com/engine/install/ then re-run this script."
@@ -129,7 +139,8 @@ if ! command -v openssl >/dev/null 2>&1; then
   info "Installing openssl..."
   case "${OS_ID}" in
     ubuntu|debian|linuxmint|pop)
-      $SUDO apt-get update -y && $SUDO apt-get install -y openssl || die "Please install openssl and re-run."
+      $SUDO apt-get update -y
+      $SUDO apt-get install -y openssl || die "Please install openssl and re-run."
       ;;
     *)
       die "openssl is required. Please install it and re-run."
@@ -137,12 +148,12 @@ if ! command -v openssl >/dev/null 2>&1; then
   esac
 fi
 
-# Allow current user to run docker without sudo (best-effort; needs re-login)
-if [[ "${EUID}" -ne 0 ]]; then
-  if ! id -nG "${USER}" | tr ' ' '\n' | grep -qx docker; then
-    info "Adding ${USER} to the docker group (log out/in may be required)..."
+# Allow the invoking user to run docker without sudo (best-effort; needs re-login)
+if [[ "${INSTALL_USER}" != "root" ]]; then
+  if ! id -nG "${INSTALL_USER}" | tr ' ' '\n' | grep -qx docker; then
+    info "Adding ${INSTALL_USER} to the docker group (log out/in may be required)..."
     warn "Members of the docker group can effectively become root via the Docker daemon."
-    $SUDO usermod -aG docker "${USER}" || warn "Could not add user to docker group."
+    $SUDO usermod -aG docker "${INSTALL_USER}" || warn "Could not add user to docker group."
   fi
 fi
 
@@ -155,12 +166,14 @@ $SUDO chmod 755 "${DATA_DIR}" "${DATA_DIR}/execution" "${DATA_DIR}/consensus"
 
 # Only chown when safe: empty tree or already owned by this user.
 # Avoid recursive chown of multi-TB chain data on every re-run.
-if [[ "${EUID}" -ne 0 ]]; then
-  if [[ -z "$(ls -A "${DATA_DIR}/execution" 2>/dev/null || true)" ]] \
-     && [[ -z "$(ls -A "${DATA_DIR}/consensus" 2>/dev/null || true)" ]]; then
-    $SUDO chown -R "${USER}:${USER}" "${DATA_DIR}" 2>/dev/null || true
+# Use sudo ls so a permission error cannot look like "empty".
+if [[ "${INSTALL_USER}" != "root" ]]; then
+  exec_listing="$($SUDO ls -A "${DATA_DIR}/execution" 2>/dev/null || true)"
+  cons_listing="$($SUDO ls -A "${DATA_DIR}/consensus" 2>/dev/null || true)"
+  if [[ -z "${exec_listing}" && -z "${cons_listing}" ]]; then
+    $SUDO chown -R "${INSTALL_USER}:${INSTALL_GROUP}" "${DATA_DIR}" 2>/dev/null || true
   else
-    $SUDO chown "${USER}:${USER}" "${DATA_DIR}" 2>/dev/null || true
+    $SUDO chown "${INSTALL_USER}:${INSTALL_GROUP}" "${DATA_DIR}" 2>/dev/null || true
   fi
 fi
 ok "${DATA_DIR} is ready (execution + consensus subdirs)."
@@ -184,17 +197,55 @@ fi
 # 5. JWT secret (required for Engine API between geth and beacon)
 # ---------------------------------------------------------------------------
 JWT_PATH="${DATA_DIR}/jwt.hex"
-if [[ -f "${JWT_PATH}" ]]; then
-  ok "JWT secret already exists at ${JWT_PATH}"
-else
+
+read_jwt_payload() {
+  local path="$1"
+  if [[ -r "${path}" ]]; then
+    tr -d '[:space:]' < "${path}"
+  else
+    $SUDO cat "${path}" 2>/dev/null | tr -d '[:space:]'
+  fi
+}
+
+write_jwt_payload() {
+  local path="$1"
+  local payload="$2"
+  printf '%s' "${payload}" | $SUDO tee "${path}" >/dev/null
+}
+
+if $SUDO test -f "${JWT_PATH}"; then
+  jwt_existing="$(read_jwt_payload "${JWT_PATH}")"
+  if jwt_payload_is_valid "${jwt_existing}"; then
+    jwt_raw_len="$($SUDO wc -c < "${JWT_PATH}" | tr -d ' ')"
+    if [[ "${jwt_raw_len}" -ne 64 ]]; then
+      info "Normalizing JWT secret at ${JWT_PATH} (stripping whitespace/newlines)..."
+      write_jwt_payload "${JWT_PATH}" "${jwt_existing}"
+    fi
+    ok "JWT secret already exists at ${JWT_PATH}"
+  else
+    warn "JWT secret at ${JWT_PATH} is invalid (expected 64 hex characters, no whitespace)."
+    jwt_bak="${JWT_PATH}.bak.$(date +%s)"
+    $SUDO mv "${JWT_PATH}" "${jwt_bak}"
+    warn "Moved it aside to ${jwt_bak}"
+  fi
+fi
+
+if ! $SUDO test -f "${JWT_PATH}"; then
   info "Generating JWT secret at ${JWT_PATH} ..."
   # No trailing newline (required by clients / official docs)
-  openssl rand -hex 32 | tr -d '\n' | $SUDO tee "${JWT_PATH}" >/dev/null
-  if [[ "${EUID}" -ne 0 ]]; then
-    $SUDO chown "${USER}:${USER}" "${JWT_PATH}" 2>/dev/null || true
+  jwt_new="$(openssl rand -hex 32 | tr -d '[:space:]')"
+  if ! jwt_payload_is_valid "${jwt_new}"; then
+    die "openssl failed to produce a 64-character hex JWT."
   fi
-  # Sanity: 64 hex chars, no newline
-  if [[ ! -s "${JWT_PATH}" ]] || [[ "$(wc -c < "${JWT_PATH}" | tr -d ' ')" -ne 64 ]]; then
+  write_jwt_payload "${JWT_PATH}" "${jwt_new}"
+  if [[ "${INSTALL_USER}" != "root" ]]; then
+    $SUDO chown "${INSTALL_USER}:${INSTALL_GROUP}" "${JWT_PATH}" 2>/dev/null || true
+  fi
+  if [[ ! -s "${JWT_PATH}" ]] && ! $SUDO test -s "${JWT_PATH}"; then
+    die "JWT secret at ${JWT_PATH} was not written."
+  fi
+  jwt_written="$(read_jwt_payload "${JWT_PATH}")"
+  if ! jwt_payload_is_valid "${jwt_written}"; then
     die "JWT secret at ${JWT_PATH} looks invalid (expected 64 hex characters)."
   fi
   ok "JWT secret created."
@@ -219,37 +270,31 @@ fi
 # ---------------------------------------------------------------------------
 # 7. Port conflict pre-check (host networking shares the host's ports)
 # ---------------------------------------------------------------------------
-check_port_in_use() {
-  local port="$1"
-  if command -v ss >/dev/null 2>&1; then
-    ss -lntu 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${port}$"
-  elif command -v lsof >/dev/null 2>&1; then
-    lsof -iTCP:"${port}" -sTCP:LISTEN >/dev/null 2>&1 \
-      || lsof -iUDP:"${port}" >/dev/null 2>&1
-  else
-    return 1
-  fi
-}
-
 PORTS_TO_CHECK=("${HTTP_PORT}" "${WS_PORT}" "${BEACON_HTTP_PORT}" "${BEACON_GRPC_PORT}" 8551 30303 13000 12000)
-PORT_CONFLICTS=()
-for port in "${PORTS_TO_CHECK[@]}"; do
-  if check_port_in_use "${port}"; then
-    PORT_CONFLICTS+=("${port}")
-  fi
-done
-if [[ "${#PORT_CONFLICTS[@]}" -gt 0 ]]; then
-  warn "These ports are already in use on this machine: ${PORT_CONFLICTS[*]}"
-  warn "A full node needs them free (or you must change ports in .env / docker-compose.yml)."
-  warn "Common cause: another Geth/Prysm/PulseChain node already running."
-  echo ""
-  if confirm_yes "Continue anyway? [y/N] "; then
-    warn "Continuing despite port conflicts..."
-  else
-    if [[ ! -t 0 ]]; then
-      die "Aborted due to port conflicts (non-interactive). Free the ports and re-run ./install.sh"
+if our_stack_running; then
+  ok "Existing ${GETH_CONTAINER}/${BEACON_CONTAINER} detected — re-run will refresh this stack (not a foreign port conflict)."
+else
+  PORT_CONFLICTS=()
+  for port in "${PORTS_TO_CHECK[@]}"; do
+    if port_in_use "${port}"; then
+      PORT_CONFLICTS+=("${port}")
     fi
-    die "Aborted due to port conflicts. Free the ports and re-run ./install.sh"
+  done
+  if [[ "${#PORT_CONFLICTS[@]}" -gt 0 ]]; then
+    warn "These ports are already in use on this machine: ${PORT_CONFLICTS[*]}"
+    warn "A full node needs them free (or you must change ports in .env / docker-compose.yml)."
+    warn "Common cause: another Geth/Prysm/PulseChain node already running."
+    echo ""
+    if [[ "${PULSE_ALLOW_PORT_CONFLICTS:-}" == "1" ]]; then
+      warn "Continuing because PULSE_ALLOW_PORT_CONFLICTS=1"
+    elif confirm_yes "Continue anyway? [y/N] "; then
+      warn "Continuing despite port conflicts..."
+    else
+      if [[ ! -t 0 ]]; then
+        die "Aborted due to port conflicts (non-interactive). Free the ports, or re-run with PULSE_ALLOW_PORT_CONFLICTS=1"
+      fi
+      die "Aborted due to port conflicts. Free the ports and re-run ./install.sh"
+    fi
   fi
 fi
 
@@ -265,7 +310,8 @@ if host_has_public_ip; then
   echo ""
   warn "This machine appears to have a public IP address on a local interface."
   warn "RPC binds to 0.0.0.0 — without a firewall this is a public unauthenticated endpoint."
-  warn "Do not use this stack on a VPS/cloud VM unless you restrict ${HTTP_PORT}/${WS_PORT}/${BEACON_HTTP_PORT}/${BEACON_GRPC_PORT}."
+  warn "Do not use this stack on a VPS/cloud VM unless you restrict ${HTTP_PORT}/${WS_PORT}."
+  warn "On a cloud VPC, UFW rules that allow 10.0.0.0/8 expose RPC to the whole VPC, not just your home LAN."
   if ufw_is_active; then
     ok "UFW is active. Confirm RPC rules are LAN-only before relying on this node."
   else
@@ -292,21 +338,42 @@ fi
 if command -v ufw >/dev/null 2>&1; then
   info "UFW is installed — adding recommended rules (RPC restricted to common private ranges)..."
 
-  # Allow P2P for better connectivity
-  $SUDO ufw allow 30303/tcp comment 'PulseChain Geth P2P' >/dev/null 2>&1 || true
-  $SUDO ufw allow 30303/udp comment 'PulseChain Geth P2P' >/dev/null 2>&1 || true
-  $SUDO ufw allow 13000/tcp comment 'PulseChain Beacon P2P TCP' >/dev/null 2>&1 || true
-  $SUDO ufw allow 12000/udp comment 'PulseChain Beacon P2P UDP' >/dev/null 2>&1 || true
+  ufw_ok=0
+  ufw_fail=0
+  ufw_try() {
+    local out=""
+    if out="$($SUDO ufw allow "$@" 2>&1)"; then
+      ufw_ok=$((ufw_ok + 1))
+    else
+      ufw_fail=$((ufw_fail + 1))
+      warn "UFW command failed: $*"
+      [[ -n "${out}" ]] && warn "  ${out}"
+    fi
+  }
 
-  # Restrict RPC / beacon APIs to common private LAN ranges (safe default)
+  # Allow P2P for better connectivity
+  ufw_try 30303/tcp comment 'PulseChain Geth P2P'
+  ufw_try 30303/udp comment 'PulseChain Geth P2P'
+  ufw_try 13000/tcp comment 'PulseChain Beacon P2P TCP'
+  ufw_try 12000/udp comment 'PulseChain Beacon P2P UDP'
+
+  # Restrict wallet RPC to common private LAN ranges (safe default).
+  # Beacon HTTP/gRPC default to localhost; rules still help if you later bind them to the LAN.
   for range in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
-    $SUDO ufw allow from "${range}" to any port "${HTTP_PORT}" proto tcp comment 'Pulse RPC HTTP - LAN' >/dev/null 2>&1 || true
-    $SUDO ufw allow from "${range}" to any port "${WS_PORT}" proto tcp comment 'Pulse RPC WS - LAN' >/dev/null 2>&1 || true
-    $SUDO ufw allow from "${range}" to any port "${BEACON_HTTP_PORT}" proto tcp comment 'Pulse Beacon API - LAN' >/dev/null 2>&1 || true
-    $SUDO ufw allow from "${range}" to any port "${BEACON_GRPC_PORT}" proto tcp comment 'Pulse Beacon gRPC - LAN' >/dev/null 2>&1 || true
+    ufw_try from "${range}" to any port "${HTTP_PORT}" proto tcp comment 'Pulse RPC HTTP - LAN'
+    ufw_try from "${range}" to any port "${WS_PORT}" proto tcp comment 'Pulse RPC WS - LAN'
+    ufw_try from "${range}" to any port "${BEACON_HTTP_PORT}" proto tcp comment 'Pulse Beacon API - LAN'
+    ufw_try from "${range}" to any port "${BEACON_GRPC_PORT}" proto tcp comment 'Pulse Beacon gRPC - LAN'
   done
 
-  ok "UFW rules added (P2P open, RPC limited to private networks)."
+  if [[ "${ufw_fail}" -gt 0 ]]; then
+    warn "UFW accepted ${ufw_ok} rule(s) and failed ${ufw_fail}. Check: sudo ufw status numbered"
+  elif $SUDO ufw status 2>/dev/null | grep -q 'Pulse RPC HTTP'; then
+    ok "UFW rules present (P2P open, RPC limited to private networks)."
+  else
+    warn "UFW commands succeeded (${ufw_ok}) but could not verify 'Pulse RPC HTTP' in ufw status."
+    warn "If UFW is not enabled yet, the rules are stored and apply after: sudo ufw enable"
+  fi
   echo ""
   warn "IMPORTANT about UFW:"
   warn "  The rules have been added, but UFW may still be inactive."
@@ -316,6 +383,7 @@ if command -v ufw >/dev/null 2>&1; then
   warn "  Then check: sudo ufw status numbered"
   warn "  If your home network uses a different subnet, edit the rules accordingly."
   warn "  IPv4 rules do not cover IPv6 — if the host has global IPv6, add matching rules or disable it."
+  warn "  10.0.0.0/8 on a cloud VPC is the VPC, not a home LAN — tighten that range on VPS hosts."
 else
   info "UFW not found — assuming no software firewall (or it is managed elsewhere). Skipping firewall rules."
 fi
@@ -327,11 +395,24 @@ if [[ ! -f docker-compose.yml ]]; then
   die "docker-compose.yml not found in ${SCRIPT_DIR}"
 fi
 
+if ! wait_for_docker; then
+  die "Cannot reach the Docker daemon. Is it running?  sudo systemctl status docker"
+fi
+
 info "Pulling official PulseChain Docker images (this may take a few minutes)..."
 run_compose pull || die "Failed to pull images. Check your internet connection and try again."
 
 info "Starting node containers..."
-run_compose up -d || die "Failed to start containers. Run: ./logs.sh"
+run_compose up -d --remove-orphans || die "Failed to start containers. Run: ./logs.sh"
+
+info "Checking that containers stayed running..."
+sleep 3
+if ! container_running "${GETH_CONTAINER}" || ! container_running "${BEACON_CONTAINER}"; then
+  err "One or both containers are not running."
+  run_compose ps || true
+  die "Install did not finish cleanly. Check logs with: ./logs.sh"
+fi
+ok "Containers ${GETH_CONTAINER} and ${BEACON_CONTAINER} are running."
 
 # ---------------------------------------------------------------------------
 # 11. Success message
@@ -343,14 +424,15 @@ echo -e "${GREEN}${BOLD}========================================${NC}"
 echo -e "${GREEN}${BOLD}  Node is starting!${NC}"
 echo -e "${GREEN}${BOLD}========================================${NC}"
 echo ""
-echo -e "  Containers: ${BOLD}pulse-geth${NC} + ${BOLD}pulse-beacon${NC}"
+echo -e "  Containers: ${BOLD}${GETH_CONTAINER}${NC} + ${BOLD}${BEACON_CONTAINER}${NC}"
 echo -e "  Data dir:   ${BOLD}${DATA_DIR}${NC}  (execution + consensus)"
 echo -e "  Network:    ${BOLD}PulseChain Mainnet${NC} (chain id 369)"
 echo -e "  Images:     ${BOLD}${GETH_IMAGE}${NC}"
 echo -e "              ${BOLD}${BEACON_IMAGE}${NC}"
 echo ""
 echo -e "${YELLOW}${BOLD}SECURITY REMINDER${NC}"
-echo -e "  RPC ports ${BOLD}${HTTP_PORT}${NC}, ${BOLD}${WS_PORT}${NC}, beacon ${BOLD}${BEACON_HTTP_PORT}${NC}, and gRPC ${BOLD}${BEACON_GRPC_PORT}${NC} are open on your LAN."
+echo -e "  Wallet RPC ports ${BOLD}${HTTP_PORT}${NC} and ${BOLD}${WS_PORT}${NC} are open on your LAN."
+echo -e "  Beacon HTTP (${BEACON_HTTP_PORT}) and gRPC (${BEACON_GRPC_PORT}) bind ${BEACON_HTTP_HOST} / ${BEACON_GRPC_HOST}."
 echo -e "  Engine API (8551) is localhost-only. Use only on a trusted home network."
 echo -e "  ${BOLD}Do not${NC} port-forward RPC/API ports to the internet."
 echo ""
@@ -362,11 +444,11 @@ echo -e "  Symbol:        PLS"
 echo -e "  Explorer:      https://scan.pulsechain.com"
 echo ""
 echo -e "${BOLD}Useful commands (from this directory):${NC}"
-echo -e "  ./status.sh        # sync, peers, disk"
+echo -e "  ./status.sh        # sync, peers, disk, wallet URL"
 echo -e "  ./logs.sh          # follow logs"
 echo -e "  ./stop.sh          # stop node"
 echo -e "  ./start.sh         # start node"
-echo -e "  ./restart.sh       # apply compose changes / restart"
+echo -e "  ./restart.sh       # recreate containers from compose"
 echo -e "  ./update.sh        # pull pinned images & recreate"
 echo ""
 echo -e "  Or:  docker compose logs -f"

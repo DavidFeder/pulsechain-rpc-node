@@ -8,7 +8,8 @@
 #
 # ⚠  Wallet RPC is bound to 0.0.0.0 (LAN-visible) by default.
 #    Use only on a trusted home network. Never port-forward 8545/8546/3500/4000.
-#    Engine API (8551) is localhost-only.
+#    Engine API (8551) and beacon HTTP/gRPC are localhost-only.
+#    Image tags are pinned by digest (see GETH_IMAGE / BEACON_IMAGE).
 
 x-logging: &default-logging
   driver: json-file
@@ -16,24 +17,32 @@ x-logging: &default-logging
     max-size: "50m"
     max-file: "5"
 
+x-ulimits: &default-ulimits
+  nofile:
+    soft: 65535
+    hard: 65535
+
 services:
   # ---------------------------------------------------------------------------
   # Execution client — Go-Pulse (geth)
-  # Pinned to v3.3.0 (same digest as :latest on 2026-08-24).
+  # Pinned to v3.3.0 by digest (same as :latest on 2026-08-28).
   # Override with GETH_IMAGE=registry.gitlab.com/pulsechaincom/go-pulse:latest
   # ---------------------------------------------------------------------------
   geth:
-    image: ${GETH_IMAGE:-registry.gitlab.com/pulsechaincom/go-pulse:v3.3.0}
+    image: ${GETH_IMAGE:-registry.gitlab.com/pulsechaincom/go-pulse:v3.3.0@sha256:d2f59592244decca2d1f53b5c8a1d2f7b26cf25d0722118567cc8978b44e526f}
     container_name: pulse-geth
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 5m
     logging: *default-logging
+    ulimits: *default-ulimits
     volumes:
       - ${DATA_DIR:-/blockchain}:/blockchain
     command:
       - --pulsechain
       - --datadir=/blockchain/execution
+      - --ipcdisable
+      - --cache=${GETH_CACHE:-1024}
       - --authrpc.jwtsecret=/blockchain/jwt.hex
       - --authrpc.addr=127.0.0.1
       - --authrpc.port=8551
@@ -55,16 +64,17 @@ services:
 
   # ---------------------------------------------------------------------------
   # Consensus client — Prysm-Pulse Beacon Chain
-  # Pinned to v2.3.0 (same digest as :latest on 2026-08-24).
+  # Pinned to v2.3.0 by digest (same as :latest on 2026-08-28).
   # Override with BEACON_IMAGE=.../beacon-chain:latest
   # ---------------------------------------------------------------------------
   beacon:
-    image: ${BEACON_IMAGE:-registry.gitlab.com/pulsechaincom/prysm-pulse/beacon-chain:v2.3.0}
+    image: ${BEACON_IMAGE:-registry.gitlab.com/pulsechaincom/prysm-pulse/beacon-chain:v2.3.0@sha256:31b44010a9e1ed35125541c4347bae8d343ea98e792651d48d595e610f4d1d78}
     container_name: pulse-beacon
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 5m
     logging: *default-logging
+    ulimits: *default-ulimits
     depends_on:
       - geth
     volumes:
@@ -77,10 +87,11 @@ services:
       - --checkpoint-sync-url=https://checkpoint.pulsechain.com
       - --genesis-beacon-api-url=https://checkpoint.pulsechain.com
       # REST/JSON HTTP API — prysm-pulse still uses grpc-gateway-* (not --http-host/--http-port)
-      - --grpc-gateway-host=0.0.0.0
+      # Localhost by default (not needed for MetaMask). Set BEACON_HTTP_HOST=0.0.0.0 for LAN.
+      - --grpc-gateway-host=${BEACON_HTTP_HOST:-127.0.0.1}
       - --grpc-gateway-port=${BEACON_HTTP_PORT:-3500}
-      # gRPC API (LAN-visible; not needed for MetaMask)
-      - --rpc-host=0.0.0.0
+      # gRPC API (localhost; not needed for MetaMask)
+      - --rpc-host=${BEACON_GRPC_HOST:-127.0.0.1}
       - --rpc-port=${BEACON_GRPC_PORT:-4000}
       - --p2p-tcp-port=13000
       - --p2p-udp-port=12000

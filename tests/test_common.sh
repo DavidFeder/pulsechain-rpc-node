@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=../common.sh
+# shellcheck disable=SC1091
 source "${ROOT}/common.sh"
 
 FAILED=0
@@ -14,6 +15,7 @@ tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
 # load_dotenv does not execute shell
+# shellcheck disable=SC2016
 printf 'DATA_DIR=/mnt/from-env\n# comment\nEVIL=$(echo pwned)\n' > "$tmp"
 unset DATA_DIR
 load_dotenv "$tmp"
@@ -22,10 +24,40 @@ if [[ "${DATA_DIR}" == "/mnt/from-env" ]]; then
 else
   fail "load_dotenv DATA_DIR got '${DATA_DIR:-}'"
 fi
+# shellcheck disable=SC2016
 if [[ "${EVIL:-}" == '$(echo pwned)' ]]; then
   pass "load_dotenv stores command substitutions as literals"
 else
   fail "load_dotenv mishandled EVIL='${EVIL:-}'"
+fi
+
+# Spaces around equals + inline comment
+unset SPACY_PORT
+printf 'SPACY_PORT = 18545 # wallets\n' > "$tmp"
+load_dotenv "$tmp"
+if [[ "${SPACY_PORT}" == "18545" ]]; then
+  pass "load_dotenv accepts spaces around = and strips unquoted comments"
+else
+  fail "load_dotenv SPACY_PORT got '${SPACY_PORT:-}'"
+fi
+
+# export prefix
+unset EXPORTED_DIR
+printf 'export EXPORTED_DIR=/opt/pulse\n' > "$tmp"
+load_dotenv "$tmp"
+if [[ "${EXPORTED_DIR}" == "/opt/pulse" ]]; then
+  pass "load_dotenv accepts export KEY=VALUE"
+else
+  fail "load_dotenv EXPORTED_DIR got '${EXPORTED_DIR:-}'"
+fi
+
+# Skipped malformed line is reported
+unset SKIP_ME
+skip_err="$(printf 'this is not = valid\n' > "$tmp"; load_dotenv "$tmp" 2>&1 >/dev/null || true)"
+if [[ "${skip_err}" == *"skipped line"* ]]; then
+  pass "load_dotenv warns on non KEY=VALUE lines"
+else
+  fail "load_dotenv should warn on malformed assignment, got '${skip_err}'"
 fi
 
 # Existing environment wins
@@ -38,11 +70,18 @@ else
   fail "load_dotenv overrode DATA_DIR to '${DATA_DIR}'"
 fi
 
-# Defaults for ports
-if [[ "${HTTP_PORT}" == "8545" || -n "${HTTP_PORT}" ]]; then
-  pass "HTTP_PORT is set (${HTTP_PORT})"
+# Defaults for ports (empty counts as unset)
+if [[ "${HTTP_PORT}" == "8545" ]]; then
+  pass "HTTP_PORT defaults to 8545"
 else
-  fail "HTTP_PORT missing"
+  fail "HTTP_PORT is '${HTTP_PORT:-}'"
+fi
+
+empty_port="$(HTTP_PORT='' BEACON_HTTP_HOST='' bash -c "source '${ROOT}/common.sh'; printf '%s %s' \"\${HTTP_PORT}\" \"\${BEACON_HTTP_HOST}\"")"
+if [[ "${empty_port}" == "8545 127.0.0.1" ]]; then
+  pass "empty HTTP_PORT / BEACON_HTTP_HOST fall back to defaults"
+else
+  fail "empty-value defaults got '${empty_port}'"
 fi
 
 # confirm_yes is non-interactive safe
@@ -50,6 +89,59 @@ if confirm_yes "should not prompt" </dev/null; then
   fail "confirm_yes returned true without a TTY/yes"
 else
   pass "confirm_yes declines when stdin is not a TTY"
+fi
+
+# Public vs RFC1918 / CGNAT
+if is_public_ipv4 "8.8.8.8" && is_public_ipv4 "1.2.3.4"; then
+  pass "is_public_ipv4 accepts public addresses"
+else
+  fail "is_public_ipv4 rejected a public address"
+fi
+if is_public_ipv4 "10.0.0.1" || is_public_ipv4 "192.168.1.1" || is_public_ipv4 "172.16.5.5" \
+   || is_public_ipv4 "127.0.0.1" || is_public_ipv4 "169.254.1.1" || is_public_ipv4 "100.64.0.1" \
+   || is_public_ipv4 "100.127.255.255"; then
+  fail "is_public_ipv4 treated a private/CGNAT/loopback address as public"
+else
+  pass "is_public_ipv4 rejects RFC1918, loopback, link-local, and CGNAT"
+fi
+if is_public_ipv4 "100.63.0.1"; then
+  pass "100.63.0.1 is not CGNAT (treated as public)"
+else
+  fail "100.63.0.1 should not be classified as CGNAT"
+fi
+
+# JWT helper
+if jwt_payload_is_valid ""; then
+  fail "jwt_payload_is_valid accepted empty"
+else
+  pass "jwt_payload_is_valid rejects empty"
+fi
+if jwt_payload_is_valid "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; then
+  pass "jwt_payload_is_valid accepts 64 hex chars"
+else
+  fail "jwt_payload_is_valid rejected a valid payload"
+fi
+printf '%s\n' "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" > "$tmp"
+if [[ "$(jwt_payload "$tmp")" == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ]]; then
+  pass "jwt_payload strips trailing newline"
+else
+  fail "jwt_payload did not strip newline"
+fi
+if jwt_payload_is_valid "not-hex" || jwt_payload_is_valid "$(printf '0%.0s' {1..63})"; then
+  fail "jwt_payload_is_valid accepted an invalid payload"
+else
+  pass "jwt_payload_is_valid rejects short or non-hex payloads"
+fi
+
+# upsert_dotenv uncomments and replaces
+printf '# GETH_IMAGE=registry.gitlab.com/pulsechaincom/go-pulse:v3.3.0\nother=keep\n' > "$tmp"
+upsert_dotenv "$tmp" GETH_IMAGE "${GETH_IMAGE_LATEST}"
+if grep -qx "GETH_IMAGE=${GETH_IMAGE_LATEST}" "$tmp" \
+   && grep -qx 'other=keep' "$tmp" \
+   && ! grep -q '^# GETH_IMAGE=' "$tmp"; then
+  pass "upsert_dotenv uncomments and sets GETH_IMAGE"
+else
+  fail "upsert_dotenv result was: $(tr '\n' '|' < "$tmp")"
 fi
 
 # Syntax of helper scripts
@@ -61,30 +153,72 @@ for script in install.sh start.sh stop.sh restart.sh logs.sh update.sh status.sh
   fi
 done
 
-# restart.sh must recreate from compose, not `compose restart`
+# restart.sh must recreate from compose, not `compose restart`, and must force-recreate
 if grep -E 'run_compose[[:space:]]+restart' "${ROOT}/restart.sh" >/dev/null; then
   fail "restart.sh still uses 'compose restart' (drops compose/flag edits)"
 else
   pass "restart.sh does not use 'compose restart'"
 fi
-if grep -qE 'up -d' "${ROOT}/restart.sh"; then
-  pass "restart.sh uses up -d"
+if grep -qE 'up -d --force-recreate' "${ROOT}/restart.sh"; then
+  pass "restart.sh uses up -d --force-recreate"
 else
-  fail "restart.sh should call up -d so compose edits apply"
+  fail "restart.sh should call up -d --force-recreate so running nodes actually bounce"
 fi
 
-# update.sh opt-in latest
-if grep -q -- '--latest' "${ROOT}/update.sh"; then
-  pass "update.sh documents --latest"
+# update.sh opt-in latest persists to .env
+if grep -q -- '--latest' "${ROOT}/update.sh" && grep -q 'upsert_dotenv' "${ROOT}/update.sh"; then
+  pass "update.sh --latest writes .env via upsert_dotenv"
 else
-  fail "update.sh missing --latest opt-in"
+  fail "update.sh should persist --latest into .env"
+fi
+if grep -qE 'up -d --force-recreate' "${ROOT}/update.sh"; then
+  pass "update.sh recreates containers after pull"
+else
+  fail "update.sh should force-recreate after pull"
 fi
 
-# JWT hardened in installer
+# Installer hardening
 if grep -q 'chmod 600' "${ROOT}/install.sh"; then
   pass "install.sh sets JWT mode 600"
 else
   fail "install.sh should chmod 600 the JWT"
+fi
+if grep -q 'jwt_payload_is_valid' "${ROOT}/install.sh"; then
+  pass "install.sh validates existing JWT secrets"
+else
+  fail "install.sh should validate existing jwt.hex"
+fi
+if grep -q 'our_stack_running' "${ROOT}/install.sh"; then
+  pass "install.sh ignores ports held by this stack"
+else
+  fail "install.sh should skip port conflicts when pulse-geth/pulse-beacon are running"
+fi
+if grep -q 'PULSE_ALLOW_PORT_CONFLICTS' "${ROOT}/install.sh"; then
+  pass "install.sh has PULSE_ALLOW_PORT_CONFLICTS override"
+else
+  fail "install.sh should allow non-interactive port-conflict override"
+fi
+if grep -q 'docker.io' "${ROOT}/install.sh" && grep -q 'wait_for_docker' "${ROOT}/install.sh"; then
+  pass "install.sh removes distro docker packages and waits for the daemon"
+else
+  fail "install.sh should remove docker.io conflicts and wait_for_docker"
+fi
+if grep -q 'container_running' "${ROOT}/install.sh"; then
+  pass "install.sh checks containers after up"
+else
+  fail "install.sh should verify pulse-geth and pulse-beacon are running"
+fi
+if grep -q 'effective_install_user' "${ROOT}/install.sh"; then
+  pass "install.sh uses effective_install_user (not raw \$USER)"
+else
+  fail "install.sh should not rely on possibly-empty USER"
+fi
+
+# status.sh prints wallet URL via detect_lan_ip
+if grep -q 'detect_lan_ip' "${ROOT}/status.sh"; then
+  pass "status.sh prints wallet RPC via detect_lan_ip"
+else
+  fail "status.sh should print the LAN RPC URL"
 fi
 
 if [[ "$FAILED" -ne 0 ]]; then
