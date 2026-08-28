@@ -266,3 +266,36 @@ confirm_yes() {
     *) return 1 ;;
   esac
 }
+
+os_is_debian_family() {
+  local os_id="${1:-}"
+  case "${os_id}" in
+    ubuntu|debian|linuxmint|pop) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Omarchy (https://omarchy.org) is Arch-based. Stock images still report ID=arch,
+# so also look for Omarchy tools and install paths.
+os_is_omarchy() {
+  local os_id="${1:-}"
+  [[ "${os_id}" == "omarchy" ]] && return 0
+  command -v omarchy-pkg-add >/dev/null 2>&1 && return 0
+  command -v omarchy >/dev/null 2>&1 && return 0
+  [[ -f /etc/profile.d/omarchy.sh ]] && return 0
+  [[ -d /usr/share/omarchy ]] && return 0
+  [[ -d "${HOME}/.local/share/omarchy" ]] && return 0
+  [[ -n "${OMARCHY_PATH:-}" && -e "${OMARCHY_PATH}" ]] && return 0
+  return 1
+}
+
+os_is_arch_family() {
+  local os_id="${1:-}"
+  local id_like="${2:-}"
+  case "${os_id}" in
+    arch|omarchy) return 0 ;;
+  esac
+  [[ "${id_like}" == *arch* ]] && return 0
+  [[ -f /etc/arch-release ]] && return 0
+  return 1
+}

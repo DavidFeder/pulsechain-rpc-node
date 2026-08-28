@@ -56,25 +56,41 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Detect OS (Ubuntu/Debian focused)
+# 2. Detect OS (Ubuntu/Debian, Omarchy, Arch)
 # ---------------------------------------------------------------------------
 if [[ -f /etc/os-release ]]; then
   # shellcheck source=/dev/null
   . /etc/os-release
   OS_ID="${ID:-unknown}"
+  OS_ID_LIKE="${ID_LIKE:-}"
 else
   OS_ID="unknown"
+  OS_ID_LIKE=""
 fi
 
-case "${OS_ID}" in
-  ubuntu|debian|linuxmint|pop)
-    ok "Detected Debian-family OS: ${OS_ID}"
-    ;;
-  *)
-    warn "OS '${OS_ID}' is not Ubuntu/Debian. Docker install may need to be done manually."
-    warn "If Docker + Compose are already installed, the rest of this script should still work."
-    ;;
-esac
+if os_is_omarchy "${OS_ID}"; then
+  ok "Detected Omarchy Linux (Arch-based)"
+elif os_is_debian_family "${OS_ID}"; then
+  ok "Detected Debian-family OS: ${OS_ID}"
+elif os_is_arch_family "${OS_ID}" "${OS_ID_LIKE}"; then
+  ok "Detected Arch-based OS: ${OS_ID}"
+else
+  warn "OS '${OS_ID}' is not Ubuntu/Debian or Omarchy/Arch. Docker install may need to be done manually."
+  warn "If Docker + Compose are already installed, the rest of this script should still work."
+fi
+
+install_arch_packages() {
+  if command -v omarchy-pkg-add >/dev/null 2>&1; then
+    # Official Omarchy helper; avoids -Syu so the ALPM update-guard is not tripped.
+    omarchy-pkg-add "$@" || die "omarchy-pkg-add failed for: $*"
+    return 0
+  fi
+  if ! command -v pacman >/dev/null 2>&1; then
+    die "pacman not found. Install Docker and openssl manually, then re-run."
+  fi
+  # Install only (no -Syu). Omarchy blocks unattended system upgrades via ALPM guard.
+  $SUDO pacman -S --noconfirm --needed "$@" || die "pacman failed to install: $*"
+}
 
 # ---------------------------------------------------------------------------
 # 3. Install Docker + Compose plugin if missing
@@ -91,8 +107,7 @@ fi
 
 if [[ "${need_docker_install}" == true ]]; then
   info "Installing Docker Engine + Compose plugin..."
-  case "${OS_ID}" in
-    ubuntu|debian|linuxmint|pop)
+  if os_is_debian_family "${OS_ID}"; then
       $SUDO apt-get update -y
       # Distro docker.io / containerd packages conflict with Docker CE.
       $SUDO apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
@@ -125,27 +140,47 @@ if [[ "${need_docker_install}" == true ]]; then
       else
         die "Docker was installed but the daemon is not responding. Try: sudo systemctl status docker"
       fi
-      ;;
-    *)
-      die "Automatic Docker install is only supported on Ubuntu/Debian. Install Docker manually: https://docs.docker.com/engine/install/ then re-run this script."
-      ;;
-  esac
+  elif os_is_omarchy "${OS_ID}" || os_is_arch_family "${OS_ID}" "${OS_ID_LIKE}"; then
+      # Arch packages: docker-compose is the v2 CLI plugin (`docker compose`).
+      # Do not use pacman -Syu — Omarchy's ALPM guard aborts unattended sysupgrades.
+      install_arch_packages docker docker-compose docker-buildx openssl
+      # Omarchy enables docker.socket (on-demand). A node needs dockerd at boot
+      # so unless-stopped containers come back after reboot.
+      $SUDO systemctl enable docker.socket 2>/dev/null || true
+      $SUDO systemctl enable --now docker
+      info "Waiting for the Docker daemon..."
+      if wait_for_docker; then
+        ok "Docker installed (Omarchy/Arch packages)."
+      else
+        die "Docker was installed but the daemon is not responding. Try: sudo systemctl status docker"
+      fi
+  else
+      die "Automatic Docker install is only supported on Ubuntu/Debian and Omarchy/Arch. Install Docker manually: https://docs.docker.com/engine/install/ then re-run this script."
+  fi
 else
   ok "Docker and Compose plugin already available."
+fi
+
+# Full nodes must start Docker on boot (Omarchy defaults to socket-activation only).
+if command -v systemctl >/dev/null 2>&1; then
+  $SUDO systemctl enable docker.socket 2>/dev/null || true
+  $SUDO systemctl enable docker 2>/dev/null || true
+  if ! $SUDO systemctl is-active --quiet docker 2>/dev/null; then
+    $SUDO systemctl start docker 2>/dev/null || true
+  fi
 fi
 
 # Ensure openssl for JWT generation
 if ! command -v openssl >/dev/null 2>&1; then
   info "Installing openssl..."
-  case "${OS_ID}" in
-    ubuntu|debian|linuxmint|pop)
+  if os_is_debian_family "${OS_ID}"; then
       $SUDO apt-get update -y
       $SUDO apt-get install -y openssl || die "Please install openssl and re-run."
-      ;;
-    *)
+  elif os_is_omarchy "${OS_ID}" || os_is_arch_family "${OS_ID}" "${OS_ID_LIKE}"; then
+      install_arch_packages openssl
+  else
       die "openssl is required. Please install it and re-run."
-      ;;
-  esac
+  fi
 fi
 
 # Allow the invoking user to run docker without sudo (best-effort; needs re-login)
@@ -375,15 +410,24 @@ if command -v ufw >/dev/null 2>&1; then
     warn "If UFW is not enabled yet, the rules are stored and apply after: sudo ufw enable"
   fi
   echo ""
-  warn "IMPORTANT about UFW:"
-  warn "  The rules have been added, but UFW may still be inactive."
-  warn "  To enable the firewall safely (after confirming SSH still works):"
-  warn "    sudo ufw allow OpenSSH"
-  warn "    sudo ufw enable"
-  warn "  Then check: sudo ufw status numbered"
-  warn "  If your home network uses a different subnet, edit the rules accordingly."
-  warn "  IPv4 rules do not cover IPv6 — if the host has global IPv6, add matching rules or disable it."
-  warn "  10.0.0.0/8 on a cloud VPC is the VPC, not a home LAN — tighten that range on VPS hosts."
+  if ufw_is_active; then
+    ok "UFW is already active — new PulseChain rules apply immediately."
+    if os_is_omarchy "${OS_ID}"; then
+      info "Omarchy defaults to deny-incoming; inbound P2P (30303/13000/12000) is now allowed."
+    fi
+    warn "If your LAN uses a different subnet than 10/8, 172.16/12, or 192.168/16, edit the RPC rules."
+    warn "IPv4 rules do not cover IPv6 — if the host has global IPv6, add matching rules or disable it."
+  else
+    warn "IMPORTANT about UFW:"
+    warn "  The rules have been added, but UFW may still be inactive."
+    warn "  To enable the firewall safely (after confirming SSH still works):"
+    warn "    sudo ufw allow OpenSSH"
+    warn "    sudo ufw enable"
+    warn "  Then check: sudo ufw status numbered"
+    warn "  If your home network uses a different subnet, edit the rules accordingly."
+    warn "  IPv4 rules do not cover IPv6 — if the host has global IPv6, add matching rules or disable it."
+    warn "  10.0.0.0/8 on a cloud VPC is the VPC, not a home LAN — tighten that range on VPS hosts."
+  fi
 else
   info "UFW not found — assuming no software firewall (or it is managed elsewhere). Skipping firewall rules."
 fi
