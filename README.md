@@ -15,7 +15,7 @@ This project packages the official PulseChain clients in Docker Compose with a s
 
 ## Quick start
 
-**Requirements:** Linux (Ubuntu 22.04 / 24.04 or Debian recommended; amd64 or arm64), `sudo`, outbound internet, and a large SSD mounted where `/blockchain` will live.
+**Requirements:** Linux (Ubuntu 22.04 / 24.04, Debian, or [Omarchy](https://omarchy.org); amd64 or arm64), `sudo`, outbound internet, and a large SSD mounted where `/blockchain` will live.
 
 ```bash
 git clone https://github.com/DavidFeder/pulsechain-rpc-node.git
@@ -26,10 +26,11 @@ chmod +x install.sh
 
 The installer will:
 
-1. Install Docker Engine and the Compose plugin if they are missing (Ubuntu/Debian)
-2. Create `/blockchain` (with `execution` / `consensus` subdirs) and generate a JWT secret if needed
-3. Pull the official images and start both containers
-4. Print your LAN IP and wallet connection settings
+1. Install Docker Engine and the Compose plugin if they are missing (Ubuntu/Debian via Docker CE; Omarchy/Arch via `omarchy-pkg-add` or pacman)
+2. Enable Docker to start on boot (needed so the node comes back after reboot; Omarchy otherwise only socket-activates Docker)
+3. Create `/blockchain` (with `execution` / `consensus` subdirs) and generate a JWT secret if needed
+4. Pull the official images and start both containers
+5. Print your LAN IP and wallet connection settings
 
 ---
 
@@ -85,11 +86,32 @@ LAN binding is intentional so phones and other machines on the same network can 
 
 ---
 
+## Omarchy Linux
+
+[Omarchy](https://omarchy.org) is Arch-based and already ships Docker, Compose, and UFW on typical installs. `./install.sh` detects it even when `/etc/os-release` still says `ID=arch`.
+
+What the installer does on Omarchy:
+
+- Installs `docker`, `docker-compose`, `docker-buildx`, and `openssl` if missing, using `omarchy-pkg-add` when that command exists (otherwise `pacman -S --needed`). It does **not** run `pacman -Syu`, which Omarchy blocks in favor of `omarchy update`.
+- Enables `docker.service` on boot. Omarchy’s default is `docker.socket` only; without a running daemon, `restart: unless-stopped` containers would not return after a reboot.
+- Adds UFW rules for P2P (open) and wallet RPC (private ranges). Omarchy’s first-run firewall is deny-incoming, so those P2P rules are what allow inbound peers.
+
+```bash
+git clone https://github.com/DavidFeder/pulsechain-rpc-node.git
+cd pulsechain-rpc-node
+chmod +x *.sh
+./install.sh
+```
+
+If Docker was just added to your user group, log out and back in (or reboot) before using `./status.sh` without sudo.
+
+---
+
 ## Installation
 
 ### Prerequisites
 
-- Linux host (Ubuntu 22.04 / 24.04 or Debian recommended; **amd64 or arm64**)
+- Linux host (Ubuntu 22.04 / 24.04, Debian, or [Omarchy](https://omarchy.org); **amd64 or arm64**). Vanilla Arch works with the same pacman path.
 - `sudo` privileges
 - Sufficient free space for `/blockchain`
 - Outbound connectivity to pull images and sync with the network
@@ -334,7 +356,7 @@ Optional variables (`DATA_DIR`, ports, image pins) are documented in `.env.examp
 
 | Issue | Suggested action |
 |-------|------------------|
-| Docker permission denied | Log out and back in after install (docker group membership), or prefix commands with `sudo` |
+| Docker permission denied | Log out and back in after install (docker group membership), or prefix commands with `sudo`. On Omarchy this is common until the session picks up the `docker` group. |
 | `address already in use` / crash loop | Another node is using ports 8545, 8546, 3500, 4000, or 8551. Stop the other process or change ports in `docker-compose.yml` |
 | Beacon cannot find execution client | Confirm both containers are running and that `/blockchain/jwt.hex` exists and is shared by both |
 | JWT / `401 Unauthorized` to execution | Ensure only one execution client is on port 8551 and both services use the same `/blockchain/jwt.hex`. The file must be 64 hex characters with **no newline**. Keep the host clock in sync (NTP / `timedatectl`); JWT `iat` skew also returns 401. |

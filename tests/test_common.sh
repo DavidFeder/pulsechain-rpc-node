@@ -213,6 +213,54 @@ if grep -q 'effective_install_user' "${ROOT}/install.sh"; then
 else
   fail "install.sh should not rely on possibly-empty USER"
 fi
+if grep -q 'omarchy-pkg-add' "${ROOT}/install.sh" && grep -q 'os_is_omarchy' "${ROOT}/install.sh"; then
+  pass "install.sh has an Omarchy/Arch package path"
+else
+  fail "install.sh should install Docker via omarchy-pkg-add or pacman"
+fi
+if grep -q 'systemctl enable docker' "${ROOT}/install.sh"; then
+  pass "install.sh enables docker.service on boot"
+else
+  fail "install.sh should enable docker.service so Omarchy nodes survive reboot"
+fi
+if grep -E '^[[:space:]]*[^#[:space:]].*pacman[[:space:]].*-Syu' "${ROOT}/install.sh"; then
+  fail "install.sh must not run pacman -Syu (Omarchy ALPM guard)"
+else
+  pass "install.sh does not run pacman -Syu"
+fi
+
+# Distro detection helpers
+if os_is_debian_family ubuntu && os_is_debian_family debian && os_is_debian_family linuxmint && os_is_debian_family pop; then
+  pass "os_is_debian_family accepts Ubuntu/Debian/Mint/Pop"
+else
+  fail "os_is_debian_family rejected a Debian-family id"
+fi
+if os_is_debian_family arch || os_is_debian_family omarchy; then
+  fail "os_is_debian_family accepted an Arch id"
+else
+  pass "os_is_debian_family rejects arch/omarchy"
+fi
+if os_is_omarchy omarchy; then
+  pass "os_is_omarchy accepts ID=omarchy"
+else
+  fail "os_is_omarchy rejected ID=omarchy"
+fi
+if os_is_arch_family arch "" && os_is_arch_family omarchy "" && os_is_arch_family cachyos "arch"; then
+  pass "os_is_arch_family accepts arch, omarchy, and ID_LIKE=arch"
+else
+  fail "os_is_arch_family rejected an Arch-family id"
+fi
+if os_is_arch_family ubuntu ""; then
+  fail "os_is_arch_family accepted ubuntu"
+else
+  pass "os_is_arch_family rejects ubuntu"
+fi
+
+if grep -q 'Omarchy' "${ROOT}/README.md"; then
+  pass "README documents Omarchy Linux"
+else
+  fail "README should document Omarchy support"
+fi
 
 # status.sh prints wallet URL via detect_lan_ip
 if grep -q 'detect_lan_ip' "${ROOT}/status.sh"; then
