@@ -13,7 +13,7 @@ GETH_CONTAINER="pulse-geth"
 BEACON_CONTAINER="pulse-beacon"
 
 # Env keys interpolated by docker-compose.yml / passed through sudo.
-COMPOSE_ENV_KEYS="DATA_DIR,HTTP_PORT,WS_PORT,BEACON_HTTP_PORT,BEACON_GRPC_PORT,BEACON_HTTP_HOST,BEACON_GRPC_HOST,GETH_IMAGE,BEACON_IMAGE,GETH_CACHE"
+COMPOSE_ENV_KEYS="DATA_DIR,HTTP_PORT,WS_PORT,HTTP_ADDR,WS_ADDR,BEACON_HTTP_PORT,BEACON_GRPC_PORT,BEACON_HTTP_HOST,BEACON_GRPC_HOST,GETH_IMAGE,BEACON_IMAGE,GETH_CACHE,GETH_P2P_PORT,BEACON_P2P_TCP_PORT,BEACON_P2P_UDP_PORT"
 
 _trim() {
   local s="$1"
@@ -100,15 +100,28 @@ load_dotenv "${_COMMON_DIR}/.env"
 [[ -n "${DATA_DIR:-}" ]] || DATA_DIR=/blockchain
 [[ -n "${HTTP_PORT:-}" ]] || HTTP_PORT=8545
 [[ -n "${WS_PORT:-}" ]] || WS_PORT=8546
+[[ -n "${HTTP_ADDR:-}" ]] || HTTP_ADDR=0.0.0.0
+[[ -n "${WS_ADDR:-}" ]] || WS_ADDR=0.0.0.0
 [[ -n "${BEACON_HTTP_PORT:-}" ]] || BEACON_HTTP_PORT=3500
 [[ -n "${BEACON_GRPC_PORT:-}" ]] || BEACON_GRPC_PORT=4000
 [[ -n "${BEACON_HTTP_HOST:-}" ]] || BEACON_HTTP_HOST=127.0.0.1
 [[ -n "${BEACON_GRPC_HOST:-}" ]] || BEACON_GRPC_HOST=127.0.0.1
 [[ -n "${GETH_CACHE:-}" ]] || GETH_CACHE=1024
+[[ -n "${GETH_P2P_PORT:-}" ]] || GETH_P2P_PORT=30303
+[[ -n "${BEACON_P2P_TCP_PORT:-}" ]] || BEACON_P2P_TCP_PORT=13000
+[[ -n "${BEACON_P2P_UDP_PORT:-}" ]] || BEACON_P2P_UDP_PORT=12000
 [[ -n "${GETH_IMAGE:-}" ]] || GETH_IMAGE="${GETH_IMAGE_PINNED}"
 [[ -n "${BEACON_IMAGE:-}" ]] || BEACON_IMAGE="${BEACON_IMAGE_PINNED}"
-export DATA_DIR HTTP_PORT WS_PORT BEACON_HTTP_PORT BEACON_GRPC_PORT
-export BEACON_HTTP_HOST BEACON_GRPC_HOST GETH_CACHE GETH_IMAGE BEACON_IMAGE
+export DATA_DIR HTTP_PORT WS_PORT HTTP_ADDR WS_ADDR BEACON_HTTP_PORT BEACON_GRPC_PORT
+export BEACON_HTTP_HOST BEACON_GRPC_HOST GETH_CACHE GETH_P2P_PORT
+export BEACON_P2P_TCP_PORT BEACON_P2P_UDP_PORT GETH_IMAGE BEACON_IMAGE
+
+wallet_rpc_is_localhost() {
+  case "${HTTP_ADDR}" in
+    127.0.0.1|localhost) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # Cache how we talk to Docker so we do not run `docker info` on every call.
 _DOCKER_MODE=""
@@ -276,10 +289,13 @@ os_is_debian_family() {
 }
 
 # Omarchy (https://omarchy.org) is Arch-based. Stock images still report ID=arch,
-# so also look for Omarchy tools and install paths.
+# so also look for Omarchy tools and install paths — but only on Arch-family hosts.
+# Leftover ~/.local/share/omarchy on Ubuntu must not steal the Debian Docker CE path.
 os_is_omarchy() {
   local os_id="${1:-}"
+  local id_like="${2:-}"
   [[ "${os_id}" == "omarchy" ]] && return 0
+  os_is_arch_family "${os_id}" "${id_like}" || return 1
   command -v omarchy-pkg-add >/dev/null 2>&1 && return 0
   command -v omarchy >/dev/null 2>&1 && return 0
   [[ -f /etc/profile.d/omarchy.sh ]] && return 0

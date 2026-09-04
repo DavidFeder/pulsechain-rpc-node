@@ -53,8 +53,10 @@ elif isinstance(sync_result, dict):
     current = hex_int(sync_result.get("currentBlock", "?"))
     highest = hex_int(sync_result.get("highestBlock", "?"))
     print(f"eth_syncing:     yes  current={current}  highest={highest}")
+    print("Do not send transactions yet (execution still syncing).")
 else:
     print(f"eth_syncing:     {sync_result}")
+    print("Do not send transactions yet (execution not reporting synced).")
 
 print(f"eth_blockNumber: {block_n}")
 print(f"net_peerCount:   {peer_n}")
@@ -101,8 +103,10 @@ if is_syncing is False:
     print("syncing:         false (beacon reports synced)")
 elif is_syncing is True:
     print(f"syncing:         yes  head_slot={head}  distance={distance}")
+    print("Do not send transactions yet (beacon still syncing).")
 else:
     print(f"syncing:         {is_syncing}")
+    print("Do not send transactions yet (beacon not reporting synced).")
 if el_offline is not None:
     print(f"el_offline:      {el_offline}")
 
@@ -124,10 +128,29 @@ fi
 echo ""
 echo "=== Wallet RPC ==="
 LAN_IP="$(detect_lan_ip)"
-echo "  LAN:       http://${LAN_IP}:${HTTP_PORT}"
-echo "  This host: http://127.0.0.1:${HTTP_PORT}"
+if wallet_rpc_is_localhost; then
+  echo "  Bind:      ${HTTP_ADDR}:${HTTP_PORT} (localhost-only; phones on the LAN cannot connect)"
+  echo "  This host: http://127.0.0.1:${HTTP_PORT}"
+else
+  echo "  Bind:      ${HTTP_ADDR}:${HTTP_PORT}"
+  echo "  LAN:       http://${LAN_IP}:${HTTP_PORT}"
+  echo "  This host: http://127.0.0.1:${HTTP_PORT}"
+  echo "  (hostname -I can print docker0 — prefer the LAN line above or this script)"
+fi
 echo "  Chain ID:  369 (PulseChain)"
-echo "  (hostname -I can print docker0 — prefer the LAN line above or this script)"
+
+echo ""
+echo "=== Images ==="
+if container_running "${GETH_CONTAINER}"; then
+  echo "  ${GETH_CONTAINER}:  $(run_docker inspect -f '{{.Config.Image}}' "${GETH_CONTAINER}" 2>/dev/null || echo unknown)"
+else
+  echo "  ${GETH_CONTAINER}:  not running"
+fi
+if container_running "${BEACON_CONTAINER}"; then
+  echo "  ${BEACON_CONTAINER}: $(run_docker inspect -f '{{.Config.Image}}' "${BEACON_CONTAINER}" 2>/dev/null || echo unknown)"
+else
+  echo "  ${BEACON_CONTAINER}: not running"
+fi
 
 echo ""
 echo "=== Disk (${DATA_DIR}) ==="
