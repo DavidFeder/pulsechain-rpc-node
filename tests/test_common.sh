@@ -84,6 +84,26 @@ else
   fail "empty-value defaults got '${empty_port}'"
 fi
 
+if [[ "${HTTP_ADDR}" == "0.0.0.0" && "${WS_ADDR}" == "0.0.0.0" && "${GETH_P2P_PORT}" == "30303" ]]; then
+  pass "HTTP_ADDR / WS_ADDR / GETH_P2P_PORT defaults"
+else
+  fail "bind/P2P defaults got HTTP_ADDR='${HTTP_ADDR:-}' WS_ADDR='${WS_ADDR:-}' GETH_P2P_PORT='${GETH_P2P_PORT:-}'"
+fi
+
+empty_bind="$(HTTP_ADDR='' WS_ADDR='' GETH_P2P_PORT='' BEACON_P2P_TCP_PORT='' BEACON_P2P_UDP_PORT='' bash -c \
+  "source '${ROOT}/common.sh'; printf '%s %s %s %s %s' \"\${HTTP_ADDR}\" \"\${WS_ADDR}\" \"\${GETH_P2P_PORT}\" \"\${BEACON_P2P_TCP_PORT}\" \"\${BEACON_P2P_UDP_PORT}\"")"
+if [[ "${empty_bind}" == "0.0.0.0 0.0.0.0 30303 13000 12000" ]]; then
+  pass "empty HTTP_ADDR / P2P ports fall back to defaults"
+else
+  fail "empty bind/P2P defaults got '${empty_bind}'"
+fi
+
+if HTTP_ADDR=127.0.0.1 wallet_rpc_is_localhost && ! HTTP_ADDR=0.0.0.0 wallet_rpc_is_localhost; then
+  pass "wallet_rpc_is_localhost treats 127.0.0.1 as localhost-only"
+else
+  fail "wallet_rpc_is_localhost misclassified HTTP_ADDR"
+fi
+
 # confirm_yes is non-interactive safe
 if confirm_yes "should not prompt" </dev/null; then
   fail "confirm_yes returned true without a TTY/yes"
@@ -203,6 +223,11 @@ if grep -q 'docker.io' "${ROOT}/install.sh" && grep -q 'wait_for_docker' "${ROOT
 else
   fail "install.sh should remove docker.io conflicts and wait_for_docker"
 fi
+if grep -q 'PULSE_ALLOW_DOCKER_CE' "${ROOT}/install.sh" && grep -q 'debian_docker_conflict_installed' "${ROOT}/install.sh"; then
+  pass "install.sh confirms before replacing an existing distro Docker"
+else
+  fail "install.sh should warn/confirm before removing docker.io"
+fi
 if grep -q 'container_running' "${ROOT}/install.sh"; then
   pass "install.sh checks containers after up"
 else
@@ -245,6 +270,19 @@ if os_is_omarchy omarchy; then
 else
   fail "os_is_omarchy rejected ID=omarchy"
 fi
+omarchy_home="$(mktemp -d)"
+mkdir -p "${omarchy_home}/.local/share/omarchy"
+if HOME="${omarchy_home}" os_is_omarchy ubuntu debian; then
+  fail "os_is_omarchy treated Ubuntu with leftover Omarchy files as Omarchy"
+else
+  pass "os_is_omarchy ignores leftover Omarchy files on Debian-family"
+fi
+if HOME="${omarchy_home}" os_is_omarchy arch ""; then
+  pass "os_is_omarchy accepts Arch with Omarchy homedir marker"
+else
+  fail "os_is_omarchy rejected Arch with Omarchy homedir marker"
+fi
+rm -rf "${omarchy_home}"
 if os_is_arch_family arch "" && os_is_arch_family omarchy "" && os_is_arch_family cachyos "arch"; then
   pass "os_is_arch_family accepts arch, omarchy, and ID_LIKE=arch"
 else
@@ -267,6 +305,27 @@ if grep -q 'detect_lan_ip' "${ROOT}/status.sh"; then
   pass "status.sh prints wallet RPC via detect_lan_ip"
 else
   fail "status.sh should print the LAN RPC URL"
+fi
+if grep -q 'wallet_rpc_is_localhost' "${ROOT}/status.sh" && grep -q 'Do not send transactions yet' "${ROOT}/status.sh"; then
+  pass "status.sh honors localhost bind and warns while syncing"
+else
+  fail "status.sh should mention localhost-only bind and sync warnings"
+fi
+if grep -q 'Config.Image' "${ROOT}/status.sh"; then
+  pass "status.sh prints running image refs"
+else
+  fail "status.sh should inspect running image names"
+fi
+
+if grep -q 'FEE_RECIPIENT' "${ROOT}/.env.example"; then
+  fail ".env.example still documents unused FEE_RECIPIENT"
+else
+  pass ".env.example does not document unused FEE_RECIPIENT"
+fi
+if grep -q 'HTTP_ADDR' "${ROOT}/.env.example" && grep -q 'GETH_P2P_PORT' "${ROOT}/.env.example"; then
+  pass ".env.example documents HTTP_ADDR and P2P ports"
+else
+  fail ".env.example should document HTTP_ADDR and GETH_P2P_PORT"
 fi
 
 if [[ "$FAILED" -ne 0 ]]; then

@@ -68,7 +68,7 @@ else
   OS_ID_LIKE=""
 fi
 
-if os_is_omarchy "${OS_ID}"; then
+if os_is_omarchy "${OS_ID}" "${OS_ID_LIKE}"; then
   ok "Detected Omarchy Linux (Arch-based)"
 elif os_is_debian_family "${OS_ID}"; then
   ok "Detected Debian-family OS: ${OS_ID}"
@@ -105,9 +105,35 @@ elif ! docker compose version >/dev/null 2>&1; then
   fi
 fi
 
+debian_docker_conflict_installed() {
+  dpkg-query -W -f='${Status} ${Package}\n' docker.io docker-doc docker-compose docker-compose-v2 podman-docker 2>/dev/null \
+    | grep -q 'install ok installed'
+}
+
 if [[ "${need_docker_install}" == true ]]; then
   info "Installing Docker Engine + Compose plugin..."
   if os_is_debian_family "${OS_ID}"; then
+      echo ""
+      warn "Docker CE setup removes conflicting distro packages if they are present:"
+      warn "  docker.io, docker-doc, docker-compose, docker-compose-v2, podman-docker, containerd, runc"
+      warn "Other containers using those packages may stop. Named volumes and bind mounts are not deleted."
+      echo ""
+      if debian_docker_conflict_installed; then
+        warn "This machine already has a distro Docker package (docker.io / docker-compose / podman-docker)."
+        warn "Replacing it with Docker CE is the usual fix, but it can disrupt existing containers."
+        warn "To skip this prompt, re-run with PULSE_ALLOW_DOCKER_CE=1"
+        echo ""
+        if [[ "${PULSE_ALLOW_DOCKER_CE:-}" == "1" ]]; then
+          warn "Continuing Docker CE replacement because PULSE_ALLOW_DOCKER_CE=1"
+        elif confirm_yes "Remove conflicting distro Docker packages and install Docker CE? [y/N] "; then
+          warn "Proceeding with Docker CE install..."
+        else
+          if [[ ! -t 0 ]]; then
+            die "Aborted (non-interactive). Install Docker CE yourself, or re-run with PULSE_ALLOW_DOCKER_CE=1"
+          fi
+          die "Aborted. Install Docker manually, or re-run and confirm, or set PULSE_ALLOW_DOCKER_CE=1"
+        fi
+      fi
       $SUDO apt-get update -y
       # Distro docker.io / containerd packages conflict with Docker CE.
       $SUDO apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
@@ -140,7 +166,7 @@ if [[ "${need_docker_install}" == true ]]; then
       else
         die "Docker was installed but the daemon is not responding. Try: sudo systemctl status docker"
       fi
-  elif os_is_omarchy "${OS_ID}" || os_is_arch_family "${OS_ID}" "${OS_ID_LIKE}"; then
+  elif os_is_omarchy "${OS_ID}" "${OS_ID_LIKE}" || os_is_arch_family "${OS_ID}" "${OS_ID_LIKE}"; then
       # Arch packages: docker-compose is the v2 CLI plugin (`docker compose`).
       # Do not use pacman -Syu — Omarchy's ALPM guard aborts unattended sysupgrades.
       install_arch_packages docker docker-compose docker-buildx openssl
@@ -176,7 +202,7 @@ if ! command -v openssl >/dev/null 2>&1; then
   if os_is_debian_family "${OS_ID}"; then
       $SUDO apt-get update -y
       $SUDO apt-get install -y openssl || die "Please install openssl and re-run."
-  elif os_is_omarchy "${OS_ID}" || os_is_arch_family "${OS_ID}" "${OS_ID_LIKE}"; then
+  elif os_is_omarchy "${OS_ID}" "${OS_ID_LIKE}" || os_is_arch_family "${OS_ID}" "${OS_ID_LIKE}"; then
       install_arch_packages openssl
   else
       die "openssl is required. Please install it and re-run."
@@ -305,7 +331,7 @@ fi
 # ---------------------------------------------------------------------------
 # 7. Port conflict pre-check (host networking shares the host's ports)
 # ---------------------------------------------------------------------------
-PORTS_TO_CHECK=("${HTTP_PORT}" "${WS_PORT}" "${BEACON_HTTP_PORT}" "${BEACON_GRPC_PORT}" 8551 30303 13000 12000)
+PORTS_TO_CHECK=("${HTTP_PORT}" "${WS_PORT}" "${BEACON_HTTP_PORT}" "${BEACON_GRPC_PORT}" 8551 "${GETH_P2P_PORT}" "${BEACON_P2P_TCP_PORT}" "${BEACON_P2P_UDP_PORT}")
 if our_stack_running; then
   ok "Existing ${GETH_CONTAINER}/${BEACON_CONTAINER} detected — re-run will refresh this stack (not a foreign port conflict)."
 else
@@ -387,10 +413,10 @@ if command -v ufw >/dev/null 2>&1; then
   }
 
   # Allow P2P for better connectivity
-  ufw_try 30303/tcp comment 'PulseChain Geth P2P'
-  ufw_try 30303/udp comment 'PulseChain Geth P2P'
-  ufw_try 13000/tcp comment 'PulseChain Beacon P2P TCP'
-  ufw_try 12000/udp comment 'PulseChain Beacon P2P UDP'
+  ufw_try "${GETH_P2P_PORT}/tcp" comment 'PulseChain Geth P2P'
+  ufw_try "${GETH_P2P_PORT}/udp" comment 'PulseChain Geth P2P'
+  ufw_try "${BEACON_P2P_TCP_PORT}/tcp" comment 'PulseChain Beacon P2P TCP'
+  ufw_try "${BEACON_P2P_UDP_PORT}/udp" comment 'PulseChain Beacon P2P UDP'
 
   # Restrict wallet RPC to common private LAN ranges (safe default).
   # Beacon HTTP/gRPC default to localhost; rules still help if you later bind them to the LAN.
@@ -412,8 +438,8 @@ if command -v ufw >/dev/null 2>&1; then
   echo ""
   if ufw_is_active; then
     ok "UFW is already active — new PulseChain rules apply immediately."
-    if os_is_omarchy "${OS_ID}"; then
-      info "Omarchy defaults to deny-incoming; inbound P2P (30303/13000/12000) is now allowed."
+    if os_is_omarchy "${OS_ID}" "${OS_ID_LIKE}"; then
+      info "Omarchy defaults to deny-incoming; inbound P2P (${GETH_P2P_PORT}/${BEACON_P2P_TCP_PORT}/${BEACON_P2P_UDP_PORT}) is now allowed."
     fi
     warn "If your LAN uses a different subnet than 10/8, 172.16/12, or 192.168/16, edit the RPC rules."
     warn "IPv4 rules do not cover IPv6 — if the host has global IPv6, add matching rules or disable it."
@@ -475,14 +501,22 @@ echo -e "  Images:     ${BOLD}${GETH_IMAGE}${NC}"
 echo -e "              ${BOLD}${BEACON_IMAGE}${NC}"
 echo ""
 echo -e "${YELLOW}${BOLD}SECURITY REMINDER${NC}"
-echo -e "  Wallet RPC ports ${BOLD}${HTTP_PORT}${NC} and ${BOLD}${WS_PORT}${NC} are open on your LAN."
+if wallet_rpc_is_localhost; then
+  echo -e "  Wallet RPC binds ${BOLD}${HTTP_ADDR}${NC}:${HTTP_PORT} (this machine only)."
+else
+  echo -e "  Wallet RPC ports ${BOLD}${HTTP_PORT}${NC} and ${BOLD}${WS_PORT}${NC} are open on your LAN (${HTTP_ADDR} / ${WS_ADDR})."
+fi
 echo -e "  Beacon HTTP (${BEACON_HTTP_PORT}) and gRPC (${BEACON_GRPC_PORT}) bind ${BEACON_HTTP_HOST} / ${BEACON_GRPC_HOST}."
 echo -e "  Engine API (8551) is localhost-only. Use only on a trusted home network."
 echo -e "  ${BOLD}Do not${NC} port-forward RPC/API ports to the internet."
 echo ""
 echo -e "${BOLD}Connect MetaMask / Internet Money:${NC}"
 echo -e "  Network Name:  PulseChain"
-echo -e "  RPC URL:       ${CYAN}http://${LAN_IP}:${HTTP_PORT}${NC}"
+if wallet_rpc_is_localhost; then
+  echo -e "  RPC URL:       ${CYAN}http://127.0.0.1:${HTTP_PORT}${NC}"
+else
+  echo -e "  RPC URL:       ${CYAN}http://${LAN_IP}:${HTTP_PORT}${NC}"
+fi
 echo -e "  Chain ID:      369"
 echo -e "  Symbol:        PLS"
 echo -e "  Explorer:      https://scan.pulsechain.com"

@@ -9,7 +9,7 @@ This project packages the official PulseChain clients in Docker Compose with a s
 | [Go-Pulse](https://gitlab.com/pulsechaincom/go-pulse) | Execution layer (JSON-RPC / WebSocket) | `registry.gitlab.com/pulsechaincom/go-pulse:v3.3.0` |
 | [Prysm-Pulse](https://gitlab.com/pulsechaincom/prysm-pulse) | Consensus layer (beacon chain) | `registry.gitlab.com/pulsechaincom/prysm-pulse/beacon-chain:v2.3.0` |
 
-**Defaults:** mainnet · checkpoint sync · data under `/blockchain` · wallet RPC on the LAN (`0.0.0.0`) · Engine API and beacon HTTP/gRPC localhost-only · digest-pinned client tags (`./update.sh --latest` writes `:latest` into `.env`)
+**Defaults:** mainnet · checkpoint sync · data under `/blockchain` · wallet RPC on the LAN (`0.0.0.0`) · Engine API and beacon HTTP/gRPC localhost-only · digest-pinned client tags (`./update.sh --latest` writes `:latest` into `.env`) · bind addresses and P2P ports via `.env` (so `git pull` does not wipe them)
 
 ---
 
@@ -82,7 +82,7 @@ CORS / vhosts default to `*` so LAN web wallets can reach the node. A page you v
 
 The installer warns if the host itself has a public IP and UFW is not active. That is the typical VPS misconfiguration (an unauthenticated public RPC). Home machines behind NAT are fine.
 
-LAN binding is intentional so phones and other machines on the same network can use `http://YOUR_LAN_IP:8545`. To restrict access to the host only, see [Localhost-only mode](#localhost-only-mode).
+LAN binding is intentional so phones and other machines on the same network can use `http://YOUR_LAN_IP:8545`. To restrict access to the host only, set `HTTP_ADDR` / `WS_ADDR` in `.env` — see [Localhost-only mode](#localhost-only-mode).
 
 ---
 
@@ -208,13 +208,14 @@ Chain data is stored under **`/blockchain`** and is retained when containers are
 
 By default, **wallet** RPC binds to `0.0.0.0` (all interfaces). The Engine API (`--authrpc.addr=127.0.0.1`, port 8551) and beacon HTTP/gRPC (`BEACON_HTTP_HOST` / `BEACON_GRPC_HOST`, default `127.0.0.1`) are already host-only.
 
-To accept wallet RPC connections **only on the host**:
+To accept wallet RPC connections **only on the host**, set these in `.env` (do not edit `docker-compose.yml` — a `git pull` would overwrite compose edits):
 
-1. Edit `docker-compose.yml`.
-2. Under the **geth** service, change:
-   - `--http.addr=0.0.0.0` → `--http.addr=127.0.0.1`
-   - `--ws.addr=0.0.0.0` → `--ws.addr=127.0.0.1`
-3. Apply the change (`./restart.sh` recreates containers from compose; it does not keep stale flags):
+```bash
+HTTP_ADDR=127.0.0.1
+WS_ADDR=127.0.0.1
+```
+
+Then apply:
 
 ```bash
 ./restart.sh
@@ -239,14 +240,14 @@ Then run `./restart.sh`. Keep those ports firewalled to your LAN; never port-for
 
 | Port | Protocol | Purpose | Default bind |
 |------|----------|---------|--------------|
-| 8545 | TCP | HTTP JSON-RPC (wallets) | `0.0.0.0` (LAN) |
-| 8546 | TCP | WebSocket RPC | `0.0.0.0` (LAN) |
+| 8545 | TCP | HTTP JSON-RPC (wallets) | `0.0.0.0` (LAN; `HTTP_ADDR` / `HTTP_PORT`) |
+| 8546 | TCP | WebSocket RPC | `0.0.0.0` (LAN; `WS_ADDR` / `WS_PORT`) |
 | 3500 | TCP | Beacon REST API | `127.0.0.1` (localhost; override with `BEACON_HTTP_HOST`) |
 | 4000 | TCP | Beacon gRPC | `127.0.0.1` (localhost; override with `BEACON_GRPC_HOST`) |
 | 8551 | TCP | Engine API (JWT; geth ↔ beacon) | `127.0.0.1` (localhost only) |
-| 30303 | TCP/UDP | Execution P2P | Host |
-| 13000 | TCP | Beacon P2P | Host |
-| 12000 | UDP | Beacon P2P | Host |
+| 30303 | TCP/UDP | Execution P2P | Host (`GETH_P2P_PORT`) |
+| 13000 | TCP | Beacon P2P | Host (`BEACON_P2P_TCP_PORT`) |
+| 12000 | UDP | Beacon P2P | Host (`BEACON_P2P_UDP_PORT`) |
 
 **Do not** forward RPC/API ports 8545, 8546, 3500, or 4000 to the public internet.
 
@@ -258,13 +259,13 @@ Your node can already make **outbound** connections. That is not enough if you w
 
 To properly participate in the network you should also accept **inbound** peers. Nodes that only make outbound connections put more load on the network and usually have worse peer counts and slower sync.
 
-**Open these ports for inbound traffic:**
+**Open these ports for inbound traffic** (defaults; keep the router in sync if you change `.env`):
 
-| Port | Protocol | Purpose |
-|------|----------|---------|
-| 30303 | TCP + UDP | Go-Pulse (execution) |
-| 13000 | TCP | Beacon P2P |
-| 12000 | UDP | Beacon P2P |
+| Port | Protocol | Purpose | `.env` |
+|------|----------|---------|--------|
+| 30303 | TCP + UDP | Go-Pulse (execution) | `GETH_P2P_PORT` |
+| 13000 | TCP | Beacon P2P | `BEACON_P2P_TCP_PORT` |
+| 12000 | UDP | Beacon P2P | `BEACON_P2P_UDP_PORT` |
 
 ### 1. Firewall on the node (UFW)
 
@@ -276,6 +277,8 @@ sudo ufw allow 30303/udp
 sudo ufw allow 13000/tcp
 sudo ufw allow 12000/udp
 ```
+
+`./install.sh` uses the P2P ports from `.env` when it adds these rules.
 
 ### 2. Port forwarding on your router (required for inbound peers)
 
@@ -338,17 +341,20 @@ On a VPS or cloud VM, `10.0.0.0/8` (and often `172.16.0.0/12`) is the **VPC**, n
 | JWT secret | `$DATA_DIR/jwt.hex` (mode `600`) |
 | Execution image | `go-pulse:v3.3.0` digest-pinned (override with `GETH_IMAGE` or `./update.sh --latest`) |
 | Beacon image | `beacon-chain:v2.3.0` digest-pinned (override with `BEACON_IMAGE` or `./update.sh --latest`) |
+| Wallet RPC bind | `0.0.0.0` (`HTTP_ADDR` / `WS_ADDR`; set `127.0.0.1` for localhost-only) |
 | Beacon HTTP / gRPC | `127.0.0.1` (`BEACON_HTTP_HOST` / `BEACON_GRPC_HOST`) |
+| P2P ports | `30303` / `13000` / `12000` (`GETH_P2P_PORT`, `BEACON_P2P_TCP_PORT`, `BEACON_P2P_UDP_PORT`) |
 | Geth IPC | disabled (`--ipcdisable`; admin APIs are not on the host filesystem) |
 | Geth cache | `1024` MB (`GETH_CACHE`) |
 | File descriptors | `nofile` 65535 (container ulimit) |
 | Checkpoint sync | `https://checkpoint.pulsechain.com` (trusted third party; same as official docs) |
 | Restart policy | `unless-stopped` |
 | Stop grace period | `5m` |
+| Geth healthcheck | `geth attach --exec eth.chainId` against local HTTP RPC (beacon does not wait on it) |
 | Container logs | json-file, 50 MB × 5 files |
 | Networking | `host` (aligned with official examples; simplifies P2P) |
 
-Optional variables (`DATA_DIR`, ports, image pins) are documented in `.env.example` and are read by both Compose and the helper scripts.
+Optional variables (`DATA_DIR`, bind addresses, ports, image pins) are documented in `.env.example` and are read by both Compose and the helper scripts. Changing `DATA_DIR` after the first sync starts a new empty node at the new path; the old chain data stays where it was.
 
 ---
 
@@ -357,10 +363,11 @@ Optional variables (`DATA_DIR`, ports, image pins) are documented in `.env.examp
 | Issue | Suggested action |
 |-------|------------------|
 | Docker permission denied | Log out and back in after install (docker group membership), or prefix commands with `sudo`. On Omarchy this is common until the session picks up the `docker` group. |
-| `address already in use` / crash loop | Another node is using ports 8545, 8546, 3500, 4000, or 8551. Stop the other process or change ports in `docker-compose.yml` |
+| Installer asks about Docker CE | On Ubuntu/Debian, replacing `docker.io` / distro Compose can stop existing containers. Confirm only if you want Docker CE, or install Docker yourself and re-run. Unattended: `PULSE_ALLOW_DOCKER_CE=1`. |
+| `address already in use` / crash loop | Another node is using ports 8545, 8546, 3500, 4000, or 8551. Stop the other process or change ports in `.env` |
 | Beacon cannot find execution client | Confirm both containers are running and that `/blockchain/jwt.hex` exists and is shared by both |
 | JWT / `401 Unauthorized` to execution | Ensure only one execution client is on port 8551 and both services use the same `/blockchain/jwt.hex`. The file must be 64 hex characters with **no newline**. Keep the host clock in sync (NTP / `timedatectl`); JWT `iat` skew also returns 401. |
-| Wallet cannot connect | Verify LAN IP from `./status.sh` (not `hostname -I` / docker0), same network, host firewall rules; test `curl` against `127.0.0.1:8545` on the node. `./restart.sh` after compose edits (it recreates containers). |
+| Wallet cannot connect | Verify LAN IP from `./status.sh` (not `hostname -I` / docker0), same network, host firewall rules; test `curl` against `127.0.0.1:8545` on the node. If you set `HTTP_ADDR=127.0.0.1`, only wallets on this machine work. `./restart.sh` after `.env` or compose edits (it recreates containers). |
 | `./restart.sh` did nothing (old versions) | Current `restart.sh` uses `docker compose up -d --force-recreate`. Upgrade the scripts if an older copy only ran `up -d`. |
 | Disk space pressure | Full nodes grow over time — monitor free space and use a large SSD |
 | Slow sync | Prefer NVMe storage, adequate RAM, and open P2P ports where practical. On 16 GB hosts, try `GETH_CACHE=512` in `.env` if the machine swaps. |

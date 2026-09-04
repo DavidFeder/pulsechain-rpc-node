@@ -48,19 +48,34 @@ services:
       - --authrpc.port=8551
       - --authrpc.vhosts=localhost
       - --http
-      - --http.addr=0.0.0.0
+      - --http.addr=${HTTP_ADDR:-0.0.0.0}
       - --http.port=${HTTP_PORT:-8545}
       - --http.api=eth,net,web3,txpool
       - --http.corsdomain=*
       - --http.vhosts=*
       - --ws
-      - --ws.addr=0.0.0.0
+      - --ws.addr=${WS_ADDR:-0.0.0.0}
       - --ws.port=${WS_PORT:-8546}
       - --ws.api=eth,net,web3,txpool
       - --ws.origins=*
       - --maxpeers=150
-      - --discovery.port=30303
-      - --port=30303
+      - --discovery.port=${GETH_P2P_PORT:-30303}
+      - --port=${GETH_P2P_PORT:-30303}
+    # Image is alpine + geth only. attach-to-HTTP is the available readiness probe.
+    # Beacon still starts as soon as the container exists (depends_on without
+    # service_healthy) so a probe mismatch cannot dead-lock first boot.
+    healthcheck:
+      test:
+        - CMD
+        - geth
+        - attach
+        - --exec
+        - eth.chainId
+        - http://127.0.0.1:${HTTP_PORT:-8545}
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 45s
 
   # ---------------------------------------------------------------------------
   # Consensus client — Prysm-Pulse Beacon Chain
@@ -93,6 +108,6 @@ services:
       # gRPC API (localhost; not needed for MetaMask)
       - --rpc-host=${BEACON_GRPC_HOST:-127.0.0.1}
       - --rpc-port=${BEACON_GRPC_PORT:-4000}
-      - --p2p-tcp-port=13000
-      - --p2p-udp-port=12000
+      - --p2p-tcp-port=${BEACON_P2P_TCP_PORT:-13000}
+      - --p2p-udp-port=${BEACON_P2P_UDP_PORT:-12000}
       - --p2p-max-peers=150

@@ -75,6 +75,37 @@ else
   fail "missing --cache=\${GETH_CACHE:-1024} in docker-compose.yml"
 fi
 
+if grep -E '^\s+-\s+--http\.addr=\$\{HTTP_ADDR:-0\.0\.0\.0\}' "$COMPOSE" >/dev/null; then
+  pass "geth --http.addr is tunable via HTTP_ADDR"
+else
+  fail "missing --http.addr=\${HTTP_ADDR:-0.0.0.0} in docker-compose.yml"
+fi
+
+if grep -E '^\s+-\s+--ws\.addr=\$\{WS_ADDR:-0\.0\.0\.0\}' "$COMPOSE" >/dev/null; then
+  pass "geth --ws.addr is tunable via WS_ADDR"
+else
+  fail "missing --ws.addr=\${WS_ADDR:-0.0.0.0} in docker-compose.yml"
+fi
+
+if grep -E '^\s+-\s+--port=\$\{GETH_P2P_PORT:-30303\}' "$COMPOSE" >/dev/null \
+   && grep -E '^\s+-\s+--p2p-tcp-port=\$\{BEACON_P2P_TCP_PORT:-13000\}' "$COMPOSE" >/dev/null; then
+  pass "P2P ports are tunable via .env"
+else
+  fail "missing interpolated GETH_P2P_PORT / BEACON_P2P_TCP_PORT in docker-compose.yml"
+fi
+
+if grep -q 'healthcheck:' "$COMPOSE" && grep -q 'eth.chainId' "$COMPOSE"; then
+  pass "geth healthcheck uses geth attach eth.chainId"
+else
+  fail "docker-compose.yml should healthcheck geth via attach eth.chainId"
+fi
+
+if grep -q 'condition: service_healthy' "$COMPOSE"; then
+  fail "beacon must not wait on service_healthy (probe mismatch would dead-lock first boot)"
+else
+  pass "beacon depends_on does not require service_healthy"
+fi
+
 if grep -E '^\s+-\s+--subscribe-all-subnets' "$COMPOSE" >/dev/null; then
   fail "subscribe-all-subnets should not be set for a private RPC node"
 else
@@ -123,8 +154,10 @@ run_compose_config() {
     return 1
   fi
   cfg="$(
-    env -u DATA_DIR -u HTTP_PORT -u WS_PORT -u BEACON_HTTP_PORT -u BEACON_GRPC_PORT \
+    env -u DATA_DIR -u HTTP_PORT -u WS_PORT -u HTTP_ADDR -u WS_ADDR \
+      -u BEACON_HTTP_PORT -u BEACON_GRPC_PORT \
       -u BEACON_HTTP_HOST -u BEACON_GRPC_HOST -u GETH_CACHE \
+      -u GETH_P2P_PORT -u BEACON_P2P_TCP_PORT -u BEACON_P2P_UDP_PORT \
       -u GETH_IMAGE -u BEACON_IMAGE \
       docker compose --env-file /dev/null -f "$COMPOSE" config 2>&1
   )" || {
@@ -192,6 +225,15 @@ if CFG="$(run_compose_config)"; then
   assert_contains "$GETH_CMD" '--http.port=8545' \
     "compose config: --http.port=8545" \
     "compose config missing default --http.port=8545"
+  assert_contains "$GETH_CMD" '--http.addr=0.0.0.0' \
+    "compose config: --http.addr=0.0.0.0" \
+    "compose config missing default --http.addr=0.0.0.0"
+  assert_contains "$GETH_CMD" '--port=30303' \
+    "compose config: --port=30303" \
+    "compose config missing default geth P2P port"
+  assert_contains "$BEACON_CMD" '--p2p-tcp-port=13000' \
+    "compose config: --p2p-tcp-port=13000" \
+    "compose config missing default beacon P2P TCP port"
   assert_contains "$CFG" 'go-pulse:v3.3.0' \
     "compose config pins go-pulse:v3.3.0" \
     "compose config did not pin go-pulse:v3.3.0"
@@ -207,7 +249,7 @@ if CFG="$(run_compose_config)"; then
 
   # .env / environment interpolation still works
   OVERRIDE="$(DATA_DIR=/mnt/pulse-data HTTP_PORT=18545 BEACON_HTTP_PORT=13500 \
-    BEACON_HTTP_HOST=0.0.0.0 GETH_CACHE=512 \
+    BEACON_HTTP_HOST=0.0.0.0 GETH_CACHE=512 HTTP_ADDR=127.0.0.1 GETH_P2P_PORT=40303 \
     docker compose --env-file /dev/null -f "$COMPOSE" config 2>&1)" || {
     fail "docker compose config with overrides failed: $OVERRIDE"
     OVERRIDE=""
@@ -230,6 +272,12 @@ if CFG="$(run_compose_config)"; then
     assert_contains "$OVERRIDE" '--cache=512' \
       "GETH_CACHE override interpolates" \
       "GETH_CACHE override did not interpolate"
+    assert_contains "$OVERRIDE" '--http.addr=127.0.0.1' \
+      "HTTP_ADDR override interpolates" \
+      "HTTP_ADDR override did not interpolate"
+    assert_contains "$OVERRIDE" '--port=40303' \
+      "GETH_P2P_PORT override interpolates" \
+      "GETH_P2P_PORT override did not interpolate"
   fi
 fi
 
@@ -256,6 +304,11 @@ if [[ -f "$README" ]]; then
     pass "README documents localhost Engine API"
   else
     fail "README should mention --authrpc.addr=127.0.0.1"
+  fi
+  if grep -q 'HTTP_ADDR=127.0.0.1' "$README" && ! grep -q '\-\-http.addr=0.0.0.0.*127.0.0.1' "$README"; then
+    pass "README documents localhost wallet RPC via HTTP_ADDR in .env"
+  else
+    fail "README should tell users to set HTTP_ADDR in .env (not edit compose)"
   fi
   if grep -q './status.sh' "$README" && ! grep -Fq 'hostname -I | awk' "$README"; then
     pass "README does not recommend hostname -I as the LAN IP method"
